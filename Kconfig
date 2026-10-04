@@ -1,0 +1,404 @@
+menu "ChenYong Component Suite"
+
+    menu "Component Enable Configuration"
+
+        config CHENYONG_VERSION_MANAGER_ENABLE
+            bool "Enable Version Manager"
+            default y
+            help
+                Enable the Version Manager component.
+                Provides automatic or manual version number management.
+
+        config CHENYONG_UI_UTILS_ENABLE
+            bool "Enable UI Utils"
+            default y
+            help
+                Enable the UI Utils component.
+                Provides WIFI icons, labels, and other UI utilities.
+
+        config CHENYONG_DISPLAY_DRIVER_ENABLE
+            bool "Enable Display Driver"
+            default y
+            select CHENYONG_UI_UTILS_ENABLE
+            help
+                Enable the Display Driver component.
+                Provides high-level display functions (text, icons).
+                Note: This will automatically enable UI Utils.
+
+        config CHENYONG_WIFI_MANAGER_ENABLE
+            bool "Enable WIFI Manager"
+            default y
+            help
+                Enable the WIFI Manager component.
+                Provides WIFI connection management, configuration interface, and time synchronization.
+
+        config CHENYONG_FONT_PARTITION_ENABLE
+            bool "Enable Font Partition"
+            default y
+            help
+                Enable the Font Partition component.
+                Provides partition size checking for font data.
+                Required when using font_service with GBK font.
+
+        config CHENYONG_FONT_SERVICE_ENABLE
+            bool "Enable Font Service"
+            default y
+            select CHENYONG_FONT_PARTITION_ENABLE
+            help
+                Enable the Font Service component.
+                Provides Chinese font display support (GBK, Yuesong, etc.).
+                Note: This will automatically enable Font Partition.
+
+    endmenu
+
+    # Version Manager 配置
+    if CHENYONG_VERSION_MANAGER_ENABLE
+        menu "Version Manager"
+
+            choice VERSION_MODE
+                prompt "Version Mode"
+                default VERSION_MODE_AUTO
+                help
+                    Select how to manage the version number.
+
+                config VERSION_MODE_AUTO
+                    bool "Auto Increment"
+                config VERSION_MODE_MANUAL
+                    bool "Manual Version"
+            endchoice
+
+            if VERSION_MODE_AUTO
+                config VERSION_AUTO_INCREMENT
+                    bool "Auto increment version on build"
+                    default y
+                    help
+                        When enabled, the patch version will automatically increment by 1
+                        each time the project is built.
+            endif
+
+            if VERSION_MODE_MANUAL
+                config VERSION_MANUAL_MAJOR
+                    int "Major Version"
+                    default 1
+                    range 0 999
+                    help
+                        Major version number (e.g., 1 in "1.0.000")
+
+                config VERSION_MANUAL_MINOR
+                    int "Minor Version"
+                    default 0
+                    range 0 999
+                    help
+                        Minor version number (e.g., 0 in "1.0.000")
+
+                config VERSION_MANUAL_PATCH
+                    int "Patch Version"
+                    default 0
+                    range 0 999
+                    help
+                        Patch version number (e.g., 0 in "1.0.000")
+            endif
+
+            config VERSION_DISPLAY_ON_START
+                bool "Display version on startup"
+                default y
+                help
+                    When enabled, the version information will be displayed on the OLED
+                    screen during the first clear operation.
+
+            config VERSION_CUSTOM_STRING
+                string "Custom Version String"
+                default ""
+                help
+                    Optional custom version string to display instead of auto-generated.
+                    Leave empty to use auto-generated version (e.g., "1.0.001").
+                    If set, this string will be displayed instead of the auto version.
+
+            config VERSION_BUILD_DATE
+                bool "Include build date in version"
+                default n
+                help
+                    When enabled, include the build date (YYYY-MM-DD) in the version string.
+                    Format: "v1.0.001 (2024-01-15)"
+
+        endmenu
+    endif
+
+    # UI Utils 配置
+    if CHENYONG_UI_UTILS_ENABLE
+        menu "UI Utils"
+        endmenu
+    endif
+
+    # Display Driver 配置
+    if CHENYONG_DISPLAY_DRIVER_ENABLE
+        menu "Display Driver Configuration"
+
+            choice DISPLAY_TYPE_CHOICE
+                prompt "Display Type"
+                default DISPLAY_TYPE_OLED_SSD1306
+                help
+                    Select the display type for your project.
+
+                config DISPLAY_TYPE_OLED_SSD1306
+                    bool "OLED SSD1306 (0.91 inch)"
+                config DISPLAY_TYPE_OLED_SSD1306_128X64
+                    bool "OLED SSD1306 (0.96 inch 128x64)"
+                config DISPLAY_TYPE_LCD_ST7789
+                    bool "LCD ST7789"
+                config DISPLAY_TYPE_LCD_ILI9341
+                    bool "LCD ILI9341"
+                config DISPLAY_TYPE_CUSTOM
+                    bool "Custom Display"
+            endchoice
+
+            config DISPLAY_TYPE
+                string
+                default "SSD1306_0.91" if DISPLAY_TYPE_OLED_SSD1306
+                default "SSD1306_0.96" if DISPLAY_TYPE_OLED_SSD1306_128X64
+                default "ST7789" if DISPLAY_TYPE_LCD_ST7789
+                default "ILI9341" if DISPLAY_TYPE_LCD_ILI9341
+                default "CUSTOM" if DISPLAY_TYPE_CUSTOM
+
+            config DISPLAY_WIDTH
+                int "Display Width (pixels)"
+                default 128
+                range 1 480
+                help
+                    Width of the display in pixels.
+
+            config DISPLAY_HEIGHT
+                int "Display Height (pixels)"
+                default 32 if DISPLAY_TYPE_OLED_SSD1306
+                default 64 if DISPLAY_TYPE_OLED_SSD1306_128X64
+                default 240 if DISPLAY_TYPE_LCD_ST7789 || DISPLAY_TYPE_LCD_ILI9341
+                default 32 if DISPLAY_TYPE_CUSTOM
+                range 1 480
+                help
+                    Height of the display in pixels.
+
+            config DISPLAY_COLOR_MODE
+                bool "Color Display Mode"
+                default n
+                help
+                    Enable color display mode. If disabled, monochrome mode is used.
+
+            config DISPLAY_ENABLE_TOUCH
+                bool "Enable Touch Support"
+                default n
+                help
+                    Enable touch screen support.
+
+            if DISPLAY_ENABLE_TOUCH
+                choice DISPLAY_TOUCH_TYPE_CHOICE
+                    prompt "Touch Controller Type"
+                    default DISPLAY_TOUCH_XPT2046
+                    help
+                        Select the touch controller type.
+
+                    config DISPLAY_TOUCH_XPT2046
+                        bool "XPT2046"
+                    config DISPLAY_TOUCH_GT911
+                        bool "GT911"
+                    config DISPLAY_TOUCH_FT5X06
+                        bool "FT5X06"
+                endchoice
+
+                config DISPLAY_TOUCH_TYPE
+                    string
+                    default "XPT2046" if DISPLAY_TOUCH_XPT2046
+                    default "GT911" if DISPLAY_TOUCH_GT911
+                    default "FT5X06" if DISPLAY_TOUCH_FT5X06
+            endif
+
+            choice DISPLAY_I2C_ADDR_CHOICE
+                prompt "I2C Address (for OLED)"
+                default DISPLAY_I2C_ADDR_60
+                help
+                    I2C address for OLED displays.
+
+                config DISPLAY_I2C_ADDR_60
+                    bool "0x3C (60, default)"
+                config DISPLAY_I2C_ADDR_61
+                    bool "0x3D (61)"
+            endchoice
+
+            config DISPLAY_I2C_ADDR
+                int
+                default 60 if DISPLAY_I2C_ADDR_60
+                default 61 if DISPLAY_I2C_ADDR_61
+                default 60
+
+            config DISPLAY_MIRROR_X
+                bool "Mirror X-axis"
+                default n
+                help
+                    Mirror the display horizontally.
+
+            config DISPLAY_MIRROR_Y
+                bool "Mirror Y-axis"
+                default n
+                help
+                    Mirror the display vertically.
+
+        endmenu
+    endif
+
+    # WIFI Manager 配置
+    if CHENYONG_WIFI_MANAGER_ENABLE
+        menu "WIFI Manager"
+
+            choice WIFI_CONFIG_MODE
+                prompt "Default configuration mode"
+                default WIFI_CONFIG_MODE_PHONE
+                help
+                    Select the default method for WIFI configuration.
+
+                config WIFI_CONFIG_MODE_PHONE
+                    bool "Phone configuration (SoftAP + Web)"
+                config WIFI_CONFIG_MODE_SCREEN
+                    bool "Screen configuration (Reserved)"
+            endchoice
+
+            config WIFI_MANAGER_MAX_RETRY_COUNT
+                int "Maximum retry count"
+                default 3
+                range 1 10
+                help
+                    Maximum number of retry attempts when WIFI connection fails.
+
+            config WIFI_MANAGER_RETRY_INTERVAL
+                int "Retry interval (ms)"
+                default 5000
+                range 1000 30000
+                help
+                    Interval between retry attempts in milliseconds.
+
+            config WIFI_MANAGER_TIME_SYNC_ENABLED
+                bool "Enable time synchronization"
+                default y
+                help
+                    Enable automatic time synchronization when WIFI is connected.
+
+            config WIFI_MANAGER_TIME_SYNC_INTERVAL
+                int "Time sync interval (minutes)"
+                default 60
+                range 1 1440
+                help
+                    Time synchronization interval in minutes (1-1440).
+
+            config WIFI_MANAGER_NTP_SERVER
+                string "NTP server"
+                default "pool.ntp.org"
+                help
+                    NTP server address for time synchronization.
+
+            config WIFI_MANAGER_AUTO_RECONNECT
+                bool "Enable auto reconnect"
+                default y
+                help
+                    Automatically reconnect when WIFI connection is lost.
+
+            config WIFI_SOFTAP_SSID_PREFIX
+                string "SoftAP SSID prefix"
+                default "ESP32_Config"
+                help
+                    Prefix for SoftAP SSID.
+
+            config WIFI_SOFTAP_PASSWORD
+                string "SoftAP password"
+                default "12345678"
+                help
+                    Password for SoftAP. Leave empty for open network.
+
+            config WIFI_SOFTAP_CHANNEL
+                int "SoftAP channel"
+                default 1
+                range 1 13
+                help
+                    WiFi channel for SoftAP.
+
+            config WIFI_SOFTAP_HIDDEN
+                bool "Hide SoftAP SSID"
+                default n
+                help
+                    Hide the SoftAP SSID from scan results.
+
+            config WIFI_WEBSERVER_PORT
+                int "Web server port"
+                default 80
+                range 1 65535
+                help
+                    Port number for the configuration web server.
+
+        endmenu
+    endif
+
+    # Font Partition 配置
+    if CHENYONG_FONT_PARTITION_ENABLE
+        menu "Font Partition"
+
+            config FONT_PARTITION_SIZE_MIN
+                int "Minimum partition size for fonts (KB)"
+                default 2048
+                range 1024 16384
+                help
+                    Minimum size in KB for the app partition when using fonts component.
+                    GBK font data requires approximately 1200KB, so 2048KB (2MB) is recommended.
+
+        endmenu
+    endif
+
+    # Font Service 配置
+    if CHENYONG_FONT_SERVICE_ENABLE
+        menu "Font Service"
+
+            choice FONT_SERVICE_TYPE
+                prompt "Font Service Type"
+                default FONT_SERVICE_TYPE_GBK
+                help
+                    Select the font service type.
+
+                config FONT_SERVICE_TYPE_GBK
+                    bool "GBK Font"
+                config FONT_SERVICE_TYPE_YUESONG
+                    bool "Yuesong Font"
+                config FONT_SERVICE_TYPE_BUILTIN
+                    bool "Built-in Font"
+                config FONT_SERVICE_TYPE_W25Q
+                    bool "W25Q External Font"
+            endchoice
+
+            config FONT_SERVICE_ENABLE_GBK
+                bool "Enable GBK font"
+                default y
+                depends on FONT_SERVICE_TYPE_GBK
+                help
+                    Enable GBK font support.
+                    GBK font data requires approximately 1.2MB of flash space.
+
+            config FONT_SERVICE_ENABLE_YUESONG
+                bool "Enable Yuesong font"
+                default n
+                depends on FONT_SERVICE_TYPE_YUESONG
+                help
+                    Enable Yuesong font support.
+
+            config FONT_SERVICE_ENABLE_W25Q
+                bool "Enable W25Q font"
+                default n
+                depends on FONT_SERVICE_TYPE_W25Q
+                help
+                    Enable W25Q external font support.
+
+            config FONT_DISPLAY_DEFAULT_COLOR
+                hex "Default font color (RGB565)"
+                default 0xFFFF
+                help
+                    Default color for font display in RGB565 format.
+                    0xFFFF = White, 0x0000 = Black, 0xF800 = Red, 0x07E0 = Green, 0x001F = Blue.
+
+        endmenu
+    endif
+
+endmenu

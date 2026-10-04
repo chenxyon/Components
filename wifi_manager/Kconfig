@@ -1,0 +1,86 @@
+menu "WIFI Manager Configuration"
+
+    choice WIFI_CONFIG_MODE
+        prompt "Default configuration mode"
+        default WIFI_CONFIG_MODE_PHONE
+        help
+            Select the default method for WIFI configuration.
+
+        config WIFI_CONFIG_MODE_PHONE
+            bool "Phone configuration (SoftAP + Web)"
+        config WIFI_CONFIG_MODE_SCREEN
+            bool "Screen configuration (Reserved)"
+    endchoice
+
+    config WIFI_MANAGER_MAX_RETRY_COUNT
+        int "Maximum retry count"
+        default 3
+        range 1 100
+        help
+            Maximum number of retry attempts when WIFI connection fails.
+
+    config WIFI_MANAGER_RETRY_INTERVAL
+        int "Retry interval (ms)"
+        default 5000
+        range 1000 30000
+        help
+            Interval between retry attempts in milliseconds.
+
+    config WIFI_MANAGER_TIME_SYNC_ENABLED
+        bool "Enable time synchronization"
+        default y
+        help
+            Enable automatic time synchronization when WIFI is connected.
+
+    config WIFI_MANAGER_TIME_SYNC_INTERVAL
+        int "Time sync interval (minutes)"
+        default 60
+        range 1 1440
+        help
+            Time synchronization interval in minutes (1-1440).
+
+    config WIFI_MANAGER_NTP_SERVER
+        string "NTP server"
+        default "pool.ntp.org"
+        help
+            NTP server address for time synchronization.
+
+    config WIFI_MANAGER_AUTO_RECONNECT
+        bool "Enable auto reconnect"
+        default y
+        help
+            Automatically reconnect when WIFI connection is lost.
+
+    config WIFI_SOFTAP_SSID_PREFIX
+        string "SoftAP SSID prefix"
+        default "ESP32_Config"
+        help
+            Prefix for SoftAP SSID.
+
+    config WIFI_SOFTAP_PASSWORD
+        string "SoftAP password"
+        default "12345678"
+        help
+            Password for SoftAP. Leave empty for open network.
+
+    config WIFI_SOFTAP_CHANNEL
+        int "SoftAP channel"
+        default 1
+        range 1 13
+        help
+            WiFi channel for SoftAP.
+
+    config WIFI_SOFTAP_HIDDEN
+        bool "Hide SoftAP SSID"
+        default n
+        help
+            Hide the SoftAP SSID from scan results.
+
+    config WIFI_WEBSERVER_PORT
+        int "Web server port"
+        default 80
+        range 1 65535
+        help
+            Port number for the configuration web server.
+
+endmenu

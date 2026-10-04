@@ -1,0 +1,71 @@
+menu "Display Driver Configuration"
+    depends on FREERTOS
+
+    config DISPLAY_DRIVER_ENABLE
+        bool "Enable Display Driver"
+        default y
+        help
+            Enable display driver component.
+
+    config DISPLAY_SPI_MOSI
+        int "SPI MOSI pin"
+        default 11
+        help
+            SPI MOSI (Data) pin number.
+
+    config DISPLAY_SPI_MISO
+        int "SPI MISO pin"
+        default -1
+        help
+            SPI MISO pin number. Set to -1 if not used.
+
+    config DISPLAY_SPI_SCLK
+        int "SPI SCLK pin"
+        default 12
+        help
+            SPI Clock pin number.
+
+    config DISPLAY_SPI_CS
+        int "SPI CS pin"
+        default 10
+        help
+            SPI Chip Select pin number.
+
+    config DISPLAY_SPI_DC
+        int "SPI DC (Data/Command) pin"
+        default 9
+        help
+            SPI Data/Command pin number.
+
+    config DISPLAY_SPI_RST
+        int "SPI RST (Reset) pin"
+        default 4
+        help
+            SPI Reset pin number. Set to -1 if not used.
+
+    config DISPLAY_SPI_BL
+        int "SPI Backlight pin"
+        default -1
+        help
+            Backlight control pin number. Set to -1 if not used.
+
+    config DISPLAY_WIDTH
+        int "Display width"
+        default 320
+        help
+            Display width in pixels.
+
+    config DISPLAY_HEIGHT
+        int "Display height"
+        default 240
+        help
+            Display height in pixels.
+
+    config DISPLAY_SPI_FREQ
+        int "SPI frequency (MHz)"
+        default 8
+        range 1 40
+        help
+            SPI clock frequency in MHz.
+
+endmenu

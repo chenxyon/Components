@@ -1,0 +1,30 @@
+menu "Desktop Grid Configuration"
+
+    config DESKTOP_GRID_ENABLE
+        bool "Enable Desktop Grid Component"
+        default y
+        help
+            Enable desktop grid UI component for app icon layout.
+
+    config DESKTOP_GRID_DEFAULT_COLS
+        int "Default grid columns"
+        default 4
+        depends on DESKTOP_GRID_ENABLE
+        help
+            Default number of columns for desktop grid layout.
+
+    config DESKTOP_GRID_DEFAULT_ROWS
+        int "Default grid rows"
+        default 4
+        depends on DESKTOP_GRID_ENABLE
+        help
+            Default number of rows for desktop grid layout.
+
+    config DESKTOP_GRID_DEFAULT_ICON_SIZE
+        int "Default icon size (px)"
+        default 60
+        depends on DESKTOP_GRID_ENABLE
+        help
+            Default icon size in pixels.
+
+endmenu

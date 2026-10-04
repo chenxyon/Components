@@ -1,0 +1,71 @@
+menu "Font Service Configuration"
+    depends on FREERTOS
+
+    config FONT_SERVICE_ENABLE
+        bool "Enable Font Service"
+        default y
+        help
+            Enable font service component.
+
+    choice FONT_SERVICE_DEFAULT_FONT
+        prompt "Default Font"
+        default FONT_SERVICE_DEFAULT_FONT_GBK
+        depends on FONT_SERVICE_ENABLE
+        help
+            Select the default font type.
+
+        config FONT_SERVICE_DEFAULT_FONT_BUILTIN
+            bool "Built-in Font (17 chars)"
+            help
+                Use built-in font with limited characters for testing.
+
+        config FONT_SERVICE_DEFAULT_FONT_GBK
+            bool "GBK Full Font (20K chars)"
+            help
+                Use GBK full font with all Chinese characters.
+
+        config FONT_SERVICE_DEFAULT_FONT_YUESONG
+            bool "Yuesong Font (20K chars)"
+            help
+                Use Yuesong font with all Chinese characters.
+
+        config FONT_SERVICE_DEFAULT_FONT_W25Q
+            bool "W25Q128 External Font"
+            help
+                Use font stored in W25Q128 external flash (reserved for future use).
+
+    endchoice
+
+    config FONT_SERVICE_ENABLE_GBK
+        bool "Enable GBK Full Font"
+        default y if FONT_SERVICE_DEFAULT_FONT_GBK
+        default n
+        depends on FONT_SERVICE_ENABLE
+        help
+            Enable GBK full font support (about 653KB flash).
+
+    config FONT_SERVICE_ENABLE_YUESONG
+        bool "Enable Yuesong Font"
+        default y if FONT_SERVICE_DEFAULT_FONT_YUESONG
+        default n
+        depends on FONT_SERVICE_ENABLE
+        help
+            Enable Yuesong font support (about 653KB flash).
+
+    config FONT_SERVICE_ENABLE_BUILTIN
+        bool "Enable Built-in Font"
+        default y if FONT_SERVICE_DEFAULT_FONT_BUILTIN
+        default y
+        depends on FONT_SERVICE_ENABLE
+        help
+            Enable built-in font support (small, about 340 bytes).
+
+    config FONT_SERVICE_ENABLE_W25Q
+        bool "Enable W25Q128 Font"
+        default y if FONT_SERVICE_DEFAULT_FONT_W25Q
+        default n
+        depends on FONT_SERVICE_ENABLE
+        help
+            Enable W25Q128 external font support (reserved).
+
+endmenu

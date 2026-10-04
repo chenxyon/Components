@@ -1,0 +1,6 @@
+## IDF Component Manager Manifest File
+version: "1.0.0"
+description: "Event-driven scheduler with watchdog support for ESP32"
+dependencies:
+  idf:
+    version: '>=5.0.0'

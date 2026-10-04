@@ -1,0 +1,22 @@
+menu "Font Partition Configuration"
+    config FONT_PARTITION_REQUIRED
+        bool "Font partition required"
+        default y
+        help
+            Font partition component requires a partition table with sufficient space.
+            The GBK font data requires approximately 1.2MB of flash space.
+            Make sure the app partition is at least 2MB to accommodate the font data.
+
+            Recommended partition table configuration:
+            - Single app large partition (2MB+)
+            - Or custom partition table with factory partition >= 2MB
+
+    config FONT_PARTITION_SIZE_MIN
+        int "Minimum partition size for fonts (KB)"
+        default 2048
+        depends on FONT_PARTITION_REQUIRED
+        help
+            Minimum size in KB for the app partition when using fonts component.
+            GBK font data requires approximately 1200KB, so 2048KB (2MB) is recommended.
+
+endmenu

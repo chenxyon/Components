@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+version: "2.2.0"
+description: "Multi-display driver with LVGL, supports SSD1306 and ILI9341. Features: auto text detection, rich text display, event-driven scheduler"
+dependencies:
+  idf:
+    version: '>=5.0.0'
+  lvgl/lvgl: '>=9.0'
+  espressif/esp_lvgl_port: '>=1.4'
+  system_scheduler:
+    path: ../system_scheduler
+    version: "1.0.0"

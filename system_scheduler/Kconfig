@@ -1,0 +1,24 @@
+menu "System Scheduler Configuration"
+    depends on FREERTOS
+
+    config SCHEDULER_ENABLE
+        bool "Enable System Scheduler"
+        default y
+        help
+            Enable system scheduler component.
+
+    config SCHEDULER_MAX_TASKS
+        int "Maximum number of scheduled tasks"
+        default 10
+        depends on SCHEDULER_ENABLE
+        help
+            Maximum number of tasks that can be registered in the scheduler.
+
+    config SCHEDULER_WATCHDOG_ENABLE
+        bool "Enable watchdog integration"
+        default n
+        depends on SCHEDULER_ENABLE
+        help
+            Enable watchdog monitoring for scheduled tasks.
+
+endmenu

@@ -1,0 +1,6 @@
+## IDF Component Manager Manifest File
+version: "1.0.0"
+description: "74HC595 shift register driver. Supports cascaded chips (1-4), GPIO-based control. Features: write data, set single output, clear all, get output state"
+dependencies:
+  idf:
+    version: '>=5.0.0'
