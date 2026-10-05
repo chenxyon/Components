@@ -205,6 +205,7 @@ static void set_json_response_headers(httpd_req_t *req) {
 }
 
 static esp_err_t scan_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "GET /api/scan received (content_len=%d)", req->content_len);
     set_json_response_headers(req);
 
     wifi_ap_record_t ap_list[20];
@@ -282,6 +283,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
  * 5. 返回响应
  */
 static esp_err_t config_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "POST /config received (content_len=%d)", req->content_len);
     set_json_response_headers(req);
 
     char buf[256];
@@ -432,6 +434,7 @@ esp_err_t wifi_webserver_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = 32768;
+    config.max_uri_handlers = 16;   /* 默认 8 个槽位不够（webserver 4 + captive_portal 9），扩到 16 */
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {

@@ -81,6 +81,8 @@ static void dns_task(void *arg)
         if (n < 12) {
             /* 不是合法 DNS 报文，或收到 ICMP 之类的杂包 */
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                /* 非阻塞模式下无数据时短暂休眠，避免忙等导致 Task Watchdog 超时 */
+                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
             continue;
