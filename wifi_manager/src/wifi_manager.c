@@ -176,8 +176,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
             case WIFI_EVENT_SCAN_DONE:
             {
-                wifi_event_scan_done_t *event = (wifi_event_scan_done_t *)event_data;
-                ESP_LOGI(TAG, "Scan done: err=%s, s_scanning=%d",
+                wifi_event_sta_scan_done_t *event = (wifi_event_sta_scan_done_t *)event_data;
+                ESP_LOGI(TAG, "Scan done: err=%s, scanning=%d",
                          esp_err_to_name(event->status), s_scanning);
                 if (s_scanning) {
                     uint16_t ap_count = sizeof(s_scan_results) / sizeof(s_scan_results[0]);
@@ -187,13 +187,21 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                     } else {
                         s_scan_count = ap_count;
                         ESP_LOGI(TAG, "Scan results: %d APs found", s_scan_count);
-                        /* 如果结果为零，打印状态帮助诊断 */
                         if (s_scan_count == 0) {
                             ESP_LOGW(TAG, "Scan returned 0 APs — check if STA interface is ready or environment has no APs");
+                            /* 检查 STA 状态，帮助判断是否为接口未就绪 */
+                            wifi_mode_t mode;
+                            if (esp_wifi_get_mode(&mode) == ESP_OK) {
+                                ESP_LOGW(TAG, "Current WiFi mode: %s",
+                                         mode == WIFI_MODE_STA ? "STA" :
+                                         mode == WIFI_MODE_AP ? "AP" :
+                                         mode == WIFI_MODE_APSTA ? "APSTA" : "UNKNOWN");
+                            }
                         }
                     }
                     s_scan_completed = true;
                     s_scanning = false;
+                    s_scan_start_ticks = 0;
                 }
                 break;
             }
@@ -433,7 +441,17 @@ esp_err_t wifi_scan_start_nonblocking(void) {
     s_scanning = true;
     s_scan_completed = false;
     s_scan_count = 0;
-    s_scan_start_ticks = xTaskGetTickCount();   /* 记录开始时间，用于超时兜底 */
+    s_scan_start_ticks = xTaskGetTickCount();
+
+    /* 打印当前 WiFi 模式，帮助诊断 */
+    wifi_mode_t mode;
+    if (esp_wifi_get_mode(&mode) == ESP_OK) {
+        ESP_LOGI(TAG, "Scan start: current mode=%s, scanning flag=%d",
+                 mode == WIFI_MODE_STA ? "STA" :
+                 mode == WIFI_MODE_AP ? "AP" :
+                 mode == WIFI_MODE_APSTA ? "AP+STA" : "UNKNOWN",
+                 s_scanning);
+    }
 
     esp_err_t err = esp_wifi_scan_start(NULL, false);
     if (err != ESP_OK) {
@@ -458,6 +476,20 @@ esp_err_t wifi_scan_get_ap_results(wifi_ap_record_t *ap_list, uint16_t max_count
     }
 
     if (s_scanning) {
+        /* 扫描进行中：检查是否超时（SCAN_DONE 事件未触发，可能 STA 接口有问题）*/
+        if (s_scan_start_ticks > 0) {
+            uint32_t elapsed = xTaskGetTickCount() - s_scan_start_ticks;
+            if (elapsed >= SCAN_TIMEOUT_TICKS) {
+                ESP_LOGE(TAG, "Scan timed out (%lu ms), STA interface may be unavailable",
+                         (unsigned long)(elapsed / portTICK_PERIOD_MS));
+                s_scanning = false;
+                s_scan_completed = true;
+                s_scan_count = 0;
+                s_scan_start_ticks = 0;
+                *count = 0;
+                return ESP_OK;
+            }
+        }
         return ESP_ERR_NOT_FINISHED;
     }
 
