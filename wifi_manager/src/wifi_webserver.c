@@ -14,11 +14,27 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include "wifi_webserver_internal.h"
+#include "captive_portal.h"
+
 /* 日志标签 */
 static const char *TAG = "wifi_webserver";
 
 /* HTTP服务器句柄 */
 static httpd_handle_t s_server = NULL;
+
+/**
+ * @brief 获取HTTP服务器句柄（组件内部接口）
+ *
+ * 功能：供 captive_portal.c 注册 302 重定向通配处理器
+ * 修改：2026-10-03 新增
+ *
+ * @return 服务器句柄，未启动时返回 NULL
+ */
+httpd_handle_t wifi_webserver_handle(void)
+{
+    return s_server;
+}
 
 static void wifi_connect_wrapper(void *arg) {
     (void)arg;
@@ -81,13 +97,23 @@ static const char *WEB_CONFIG_PAGE =
     "<script>"
     "var selectedSsid = '';"
     "var scanInterval = null;"
+    "var scanAttempts = 0;"
+    "var SCAN_MAX_ATTEMPTS = 15;"
     "function scanWifi(){"
     "document.getElementById('scanning').style.display='block';"
     "document.getElementById('wifi-list').innerHTML='';"
     "if(scanInterval) clearInterval(scanInterval);"
+    "scanAttempts = 0;"
     "fetchScan();"
     "}"
     "function fetchScan(){"
+    "scanAttempts++;"
+    "if(scanAttempts > SCAN_MAX_ATTEMPTS){"
+    "document.getElementById('scanning').style.display='none';"
+    "if(scanInterval) clearInterval(scanInterval);"
+    "document.getElementById('wifi-list').innerHTML='<div style=\"text-align:center;color:red\">扫描超时，请重试</div>';"
+    "return;"
+    "}"
     "fetch('/api/scan')"
     ".then(function(response){return response.json();})"
     ".then(function(data){"
@@ -184,12 +210,22 @@ static esp_err_t scan_handler(httpd_req_t *req) {
     esp_err_t err = wifi_scan_get_ap_results(ap_list, 20, &ap_count);
 
     if (err == ESP_ERR_NOT_FINISHED) {
+        /* 扫描进行中，返回 scanning:true 让 JS 继续轮询 */
         httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
         return ESP_OK;
     }
 
     if (err == ESP_ERR_NOT_FOUND) {
-        wifi_scan_start_nonblocking();
+        /* 尚未启动过扫描，或上次扫描已结束但结果已被消费，启动新的非阻塞扫描 */
+        esp_err_t start_err = wifi_scan_start_nonblocking();
+        if (start_err != ESP_OK) {
+            /* 扫描已在进行或其他错误：如果 s_scanning=true，说明上一次启动成功了，
+               但本条件块只在 NOT_FOUND 时进入（s_scanning==false && s_scan_completed==false），
+               所以这里大概率是 scan already in progress，返回 scanning:true 让 JS 继续轮询 */
+            ESP_LOGW(TAG, "Scan start failed: %s, will retry on next poll", esp_err_to_name(start_err));
+            httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
+            return ESP_OK;
+        }
         httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
         return ESP_OK;
     }
@@ -199,15 +235,16 @@ static esp_err_t scan_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
+    /* 扫描完成，返回结果 */
     char response[2048] = "{\"success\":true,\"aps\":[";
     for (int i = 0; i < ap_count; i++) {
         if (i > 0) strcat(response, ",");
-        
+
         int auth_idx = ap_list[i].authmode < 9 ? ap_list[i].authmode : 8;
         char ap_json[200];
-        snprintf(ap_json, sizeof(ap_json), 
+        snprintf(ap_json, sizeof(ap_json),
                  "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\",\"channel\":%d}",
-                 ap_list[i].ssid, ap_list[i].rssi, 
+                 ap_list[i].ssid, ap_list[i].rssi,
                  auth_type_str[auth_idx], ap_list[i].primary);
         strcat(response, ap_json);
     }
@@ -408,18 +445,29 @@ esp_err_t wifi_webserver_start(void) {
     httpd_register_uri_handler(s_server, &options_scan_uri);
 
     ESP_LOGI(TAG, "Web server started on port 80");
+
+    /* 启动 Captive Portal：手机/电脑连上热点后自动弹出配网页，无需手动访问 IP。
+       AP 网关固定为 192.168.4.1（esp_wifi 内部默认网段） */
+    esp_err_t ap_err = captive_portal_start("192.168.4.1");
+    if (ap_err != ESP_OK) {
+        ESP_LOGW(TAG, "Captive Portal 启动失败：%s", esp_err_to_name(ap_err));
+    }
+
     return ESP_OK;
 }
 
 /**
  * @brief 停止Web配置服务器
- * 
+ *
  * @return esp_err_t ESP_OK表示成功，其他表示失败
  */
 esp_err_t wifi_webserver_stop(void) {
     if (s_server == NULL) {
         return ESP_OK;
     }
+
+    /* 先停 Captive Portal 再停 HTTP：DNS 任务需在服务器停止前注销通配处理器 */
+    captive_portal_stop();
 
     httpd_stop(s_server);
     s_server = NULL;

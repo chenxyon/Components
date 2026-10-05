@@ -39,10 +39,12 @@ static uint8_t s_retry_count = 0;
 wifi_config_mode_t s_current_config_mode = WIFI_CONFIG_MODE_NONE;
 
 /* 扫描状态 */
-static bool s_scanning = false;
-static bool s_scan_completed = false;
+static bool      s_scanning           = false;
+static bool      s_scan_completed     = false;
+static uint32_t  s_scan_start_ticks   = 0;   /*!< 开始扫描时的 xTaskGetTickCount，用于超时兜底 */
 static wifi_ap_record_t s_scan_results[20];
-static uint16_t s_scan_count = 0;
+static uint16_t  s_scan_count         = 0;
+#define SCAN_TIMEOUT_TICKS  pdMS_TO_TICKS(15000)  /* 15 秒超时 */
 
 /* 前向声明 */
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -173,16 +175,28 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 break;
 
             case WIFI_EVENT_SCAN_DONE:
-                ESP_LOGI(TAG, "Scan done");
+            {
+                wifi_event_scan_done_t *event = (wifi_event_scan_done_t *)event_data;
+                ESP_LOGI(TAG, "Scan done: err=%s, s_scanning=%d",
+                         esp_err_to_name(event->status), s_scanning);
                 if (s_scanning) {
                     uint16_t ap_count = sizeof(s_scan_results) / sizeof(s_scan_results[0]);
-                    esp_wifi_scan_get_ap_records(&ap_count, s_scan_results);
-                    s_scan_count = ap_count;
+                    esp_err_t get_err = esp_wifi_scan_get_ap_records(&ap_count, s_scan_results);
+                    if (get_err != ESP_OK) {
+                        ESP_LOGE(TAG, "scan_get_results failed: %s", esp_err_to_name(get_err));
+                    } else {
+                        s_scan_count = ap_count;
+                        ESP_LOGI(TAG, "Scan results: %d APs found", s_scan_count);
+                        /* 如果结果为零，打印状态帮助诊断 */
+                        if (s_scan_count == 0) {
+                            ESP_LOGW(TAG, "Scan returned 0 APs — check if STA interface is ready or environment has no APs");
+                        }
+                    }
                     s_scan_completed = true;
-                    ESP_LOGI(TAG, "Scan results: %d APs found", s_scan_count);
                     s_scanning = false;
                 }
                 break;
+            }
 
             default:
                 /* 其他未处理的事件 */
@@ -419,11 +433,14 @@ esp_err_t wifi_scan_start_nonblocking(void) {
     s_scanning = true;
     s_scan_completed = false;
     s_scan_count = 0;
+    s_scan_start_ticks = xTaskGetTickCount();   /* 记录开始时间，用于超时兜底 */
 
     esp_err_t err = esp_wifi_scan_start(NULL, false);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Scan start failed: %s", esp_err_to_name(err));
         s_scanning = false;
+        s_scan_completed = true;   /* 标记完成（结果为零），防止无限重试 */
+        s_scan_count = 0;
         return err;
     }
 

@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../ESP32S3/BAK"
+		}
+	],
+	"settings": {}
+}

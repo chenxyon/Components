@@ -8,10 +8,12 @@ idf_component_register(
         "src/wifi_softap.c"
         "src/wifi_webserver.c"
         "src/wifi_screen_ui.c"
+        "src/captive_portal.c"
     INCLUDE_DIRS "include"
     REQUIRES 
         esp_wifi 
         esp_event 
+        esp_netif
         nvs_flash 
         lwip 
         esp_http_server
@@ -20,5 +22,5 @@ idf_component_register(
 message(STATUS "=================================================")
 message(STATUS "WIFI Manager Component")
 message(STATUS "=================================================")
-message(STATUS "Version: 1.0.0")
+message(STATUS "Version: 1.1.0")
 message(STATUS "=================================================")
