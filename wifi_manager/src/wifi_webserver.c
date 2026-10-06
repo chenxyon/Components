@@ -29,7 +29,7 @@ static void wifi_connect_wrapper(void *arg) {
 }
 
 /* WiFiManager风格中文配置页 */
-static const char WEB_CONFIG_PAGE[] = R"(
+static const char WEB_CONFIG_PAGE[] = R"HTML(
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -61,17 +61,17 @@ input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1p
 </head>
 <body>
 <div class="card">
-<h1>&#x2736; WiFi &#x914D;&#x7F6E;</h1>
+<h1>✶ WiFi 配置</h1>
 <div id="wifi-list" class="wifi-list"></div>
-<div id="scanning" class="scanning">&#x6B63;&#x5728;&#x626B;&#x63CF;...</div>
+<div id="scanning" class="scanning">正在扫描...</div>
 <form id="configForm">
-<label for="ssid">WiFi &#x540D;&#x79F0;</label>
+<label for="ssid">WiFi 名称</label>
 <input type="text" id="ssid" name="ssid" required>
-<label for="password">&#x5BC6;&#x7801;</label>
+<label for="password">密码</label>
 <input type="password" id="password" name="password">
-<button type="submit" class="btn-save">&#x4FDD;&#x5B58;&#x5E76;&#x8FDE;&#x63A5;</button>
+<button type="submit" class="btn-save">保存并连接</button>
 </form>
-<button class="btn-scan" onclick="doScan()">&#x626B;&#x63CF;&#x53EF;&#x7528; WiFi</button>
+<button class="btn-scan" onclick="doScan()">扫描可用 WiFi</button>
 <div id="status" class="status"></div>
 </div>
 <script>
@@ -87,7 +87,7 @@ function fetchScan(){
   if(scanTry>MAX){
     document.getElementById('scanning').style.display='none';
     if(scanIv) clearInterval(scanIv);
-    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">&#x626B;&#x63CF;&#x8D85;&#x65F6;&#xFF0C;&#x8BF7;&#x91CD;&#x8BD5;</div>';
+    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">扫描超时，请重试</div>';
     return;
   }
   fetch('/api/scan').then(function(r){return r.json();})
@@ -100,24 +100,24 @@ function fetchScan(){
         d.aps.forEach(function(a){
           h+='<div class="wifi-item" onclick="pick(\''+a.ssid+'\')">';
           h+='<div class="wifi-name">'+a.ssid+'</div>';
-          h+='<div class="wifi-info">&#x4FE1;&#x53F7;:'+a.rssi+' dBm | '+a.auth+'</div>';
+          h+='<div class="wifi-info">信号:'+a.rssi+' dBm | '+a.auth+'</div>';
           h+='</div>';
         });
         document.getElementById('wifi-list').innerHTML=h;
       } else {
-        document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:#888">&#x672A;&#x626B;&#x63CF;&#x5230;&#x53EF;&#x7528;&#x7684;WiFi</div>';
+        document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:#888">未扫描到可用的WiFi</div>';
       }
     } else if(d.scanning){
       scanIv=setTimeout(fetchScan,1000);
     } else {
       document.getElementById('scanning').style.display='none';
       if(scanIv) clearInterval(scanIv);
-      document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">&#x626B;&#x63CF;&#x5931;&#x8D25;</div>';
+      document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">扫描失败</div>';
     }
   }).catch(function(){
     document.getElementById('scanning').style.display='none';
     if(scanIv) clearInterval(scanIv);
-    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">&#x8BF7;&#x6C42;&#x5931;&#x8D25;</div>';
+    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">请求失败</div>';
   });
 }
 function pick(ssid){
@@ -131,29 +131,30 @@ document.getElementById('configForm').addEventListener('submit',function(e){
   e.preventDefault();
   var ssid=document.getElementById('ssid').value.trim();
   var pwd=document.getElementById('password').value;
-  if(!ssid){ alert('\u8BF7\u8F93\u5165WiFi\u540D\u79F0'); return; }
+  if(!ssid){ alert('请输入WiFi名称'); return; }
   fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,password:pwd})})
   .then(function(r){return r.json();})
   .then(function(d){
     var s=document.getElementById('status');
     if(d.success){
       s.className='status success';
-      s.textContent='\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u6B63\u5728\u8FDE\u63A5...';
+      s.textContent='配置已保存，正在连接...';
       if(scanIv) clearInterval(scanIv);
     } else {
       s.className='status error';
-      s.textContent='\u4FDD\u5B58\u5931\u8D25:'+d.error;
+      s.textContent='保存失败:'+d.error;
     }
   }).catch(function(err){
     var s=document.getElementById('status');
     s.className='status error';
-    s.textContent='\u8BF7\u6C42\u5931\u8D25:'+err;
+    s.textContent='请求失败:'+err;
   });
 });
 fetchScan();
 </script>
 </body>
-</html>)";
+</html>
+)HTML";
 
 static const char *auth_type_str[] = {
 
