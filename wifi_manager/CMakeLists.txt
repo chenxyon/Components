@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "src/wifi_manager.c"
         "src/wifi_config.c"
         "src/wifi_scan.c"
@@ -10,17 +10,15 @@ idf_component_register(
         "src/wifi_screen_ui.c"
         "src/captive_portal.c"
     INCLUDE_DIRS "include"
-    REQUIRES 
-        esp_wifi 
-        esp_event 
+    REQUIRES
+        esp_wifi
+        esp_event
         esp_netif
-        nvs_flash 
-        lwip 
+        nvs_flash
+        lwip
         esp_http_server
 )
 
 message(STATUS "=================================================")
-message(STATUS "WIFI Manager Component")
-message(STATUS "=================================================")
-message(STATUS "Version: 1.1.0")
+message(STATUS "WiFi Manager Component v2.0 (merged wifi_prov)")
 message(STATUS "=================================================")

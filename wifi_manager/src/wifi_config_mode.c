@@ -132,3 +132,9 @@ esp_err_t wifi_config_mode_stop(void) {
 wifi_config_mode_t wifi_config_mode_get_current(void) {
     return s_current_config_mode;
 }
+
+/* 内部包装：接收 int 而非枚举，供 wifi_manager.c 调用 */
+esp_err_t wifi_config_mode_start_internal(int mode)
+{
+    return wifi_config_mode_start((wifi_config_mode_t)mode);
+}

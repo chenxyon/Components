@@ -75,49 +75,48 @@ input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1p
 <div id="status" class="status"></div>
 </div>
 <script>
-var sel='',scanIv=null,scanTry=0,MAX=15;
+var sel='',scanIv=null,scanTry=0,MAX=20;
+function stopScan(){ if(scanIv){clearTimeout(scanIv);scanIv=null;} }
+function showMsg(msg,color){
+  document.getElementById('scanning').style.display='none';
+  document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:'+color+'">'+msg+'</div>';
+}
 function doScan(){
   document.getElementById('scanning').style.display='block';
   document.getElementById('wifi-list').innerHTML='';
-  if(scanIv) clearInterval(scanIv);
-  scanTry=0; fetchScan();
+  stopScan();
+  scanTry=0; fetchScan(true);
 }
-function fetchScan(){
+function fetchScan(force){
   scanTry++;
-  if(scanTry>MAX){
-    document.getElementById('scanning').style.display='none';
-    if(scanIv) clearInterval(scanIv);
-    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">扫描超时，请重试</div>';
-    return;
-  }
-  fetch('/api/scan').then(function(r){return r.json();})
+  if(scanTry>MAX){ stopScan(); showMsg('扫描超时，请重试','#c00'); return; }
+  var url='/api/scan'+(force?'?force=1':'');
+  fetch(url,{cache:'no-store'}).then(function(r){return r.json();})
   .then(function(d){
     if(d.success&&d.aps){
+      stopScan();
       document.getElementById('scanning').style.display='none';
-      if(scanIv) clearInterval(scanIv);
       if(d.aps.length>0){
         var h='';
         d.aps.forEach(function(a){
           h+='<div class="wifi-item" onclick="pick(\''+a.ssid+'\')">';
           h+='<div class="wifi-name">'+a.ssid+'</div>';
-          h+='<div class="wifi-info">信号:'+a.rssi+' dBm | '+a.auth+'</div>';
+          h+='<div class="wifi-info">信号:'+a.rssi+' dBm | '+a.auth+' | 信道:'+a.channel+'</div>';
           h+='</div>';
         });
         document.getElementById('wifi-list').innerHTML=h;
       } else {
-        document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:#888">未扫描到可用的WiFi</div>';
+        showMsg('未扫描到可用的 WiFi','#888');
       }
     } else if(d.scanning){
-      scanIv=setTimeout(fetchScan,1000);
+      scanIv=setTimeout(function(){fetchScan(false);},1000);
     } else {
-      document.getElementById('scanning').style.display='none';
-      if(scanIv) clearInterval(scanIv);
-      document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">扫描失败</div>';
+      stopScan();
+      showMsg('扫描失败：'+(d.error||'未知错误'),'#c00');
     }
   }).catch(function(){
-    document.getElementById('scanning').style.display='none';
-    if(scanIv) clearInterval(scanIv);
-    document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:red">请求失败</div>';
+    stopScan();
+    showMsg('请求失败，请刷新重试','#c00');
   });
 }
 function pick(ssid){
@@ -150,7 +149,7 @@ document.getElementById('configForm').addEventListener('submit',function(e){
     s.textContent='请求失败:'+err;
   });
 });
-fetchScan();
+doScan();
 </script>
 </body>
 </html>
@@ -185,108 +184,76 @@ static void set_json_response_headers(httpd_req_t *req) {
 
 
 static esp_err_t scan_handler(httpd_req_t *req) {
-
-    ESP_LOGI(TAG, "GET /api/scan received (content_len=%d)", req->content_len);
-
+    ESP_LOGI(TAG, "GET /api/scan");
     set_json_response_headers(req);
 
+    /* 支持 ?force=1 强制重新扫描（"扫描可用 WiFi" 按钮用） */
+    bool force = false;
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[8] = { 0 };
+        if (httpd_query_key_value(query, "force", val, sizeof(val)) == ESP_OK
+            && val[0] == '1') {
+            force = true;
+        }
+    }
 
+    if (force && !wifi_scan_is_running()) {
+        esp_err_t se = wifi_scan_start_nonblocking();
+        if (se != ESP_OK) {
+            ESP_LOGE(TAG, "force scan start failed: %s", esp_err_to_name(se));
+            httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan start failed\"}");
+            return ESP_OK;
+        }
+    }
 
-    wifi_ap_record_t ap_list[20];
-
+    /* 结果数组放 static：wifi_ap_record_t[20] 约 2.2KB + 响应缓冲约 3KB，
+       若放在 httpd 任务栈（默认仅 4KB）上会溢出，导致扫描完成后崩溃/卡死 */
+    static wifi_ap_record_t ap_list[20];
     uint16_t ap_count = 0;
-
     esp_err_t err = wifi_scan_get_ap_results(ap_list, 20, &ap_count);
 
-
-
     if (err == ESP_ERR_NOT_FINISHED) {
-
-        /* 扫描进行中，返回 scanning:true 让 JS 继续轮询 */
-
-        httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
-
+        httpd_resp_sendstr(req, "{\"success\":false,\"scanning\":true}");
         return ESP_OK;
-
     }
-
-
 
     if (err == ESP_ERR_NOT_FOUND) {
-
-        /* 尚未启动过扫描，或上次扫描已结束但结果已被消费，启动新的非阻塞扫描 */
-
-        esp_err_t start_err = wifi_scan_start_nonblocking();
-
-        if (start_err != ESP_OK) {
-
-            /* 扫描已在进行或其他错误：如果 s_scanning=true，说明上一次启动成功了，
-
-               但本条件块只在 NOT_FOUND 时进入（s_scanning==false && s_scan_completed==false），
-
-               所以这里大概率是 scan already in progress，返回 scanning:true 让 JS 继续轮询 */
-
-            ESP_LOGW(TAG, "Scan start failed: %s, will retry on next poll", esp_err_to_name(start_err));
-
-            httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
-
+        esp_err_t se = wifi_scan_start_nonblocking();
+        if (se != ESP_OK && se != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "scan start failed: %s", esp_err_to_name(se));
+            httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan start failed\"}");
             return ESP_OK;
-
         }
-
-        httpd_resp_send(req, "{\"success\":false,\"scanning\":true}", 43);
-
+        httpd_resp_sendstr(req, "{\"success\":false,\"scanning\":true}");
         return ESP_OK;
-
     }
-
-
 
     if (err != ESP_OK) {
-
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Scan failed\"}", 42);
-
+        httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan failed\"}");
         return ESP_OK;
-
     }
 
-
-
-    /* 扫描完成，返回结果 */
-
-    char response[2048] = "{\"success\":true,\"aps\":[";
-
-    for (int i = 0; i < ap_count; i++) {
-
-        if (i > 0) strcat(response, ",");
-
-
-
+    /* 构建 JSON，带边界检查，避免长 SSID/多 AP 时溢出 */
+    static char response[3072];
+    int off = snprintf(response, sizeof(response), "{\"success\":true,\"aps\":[");
+    for (int i = 0; i < ap_count && off > 0 && off < (int)sizeof(response) - 220; i++) {
         int auth_idx = ap_list[i].authmode < 9 ? ap_list[i].authmode : 8;
-
-        char ap_json[200];
-
-        snprintf(ap_json, sizeof(ap_json),
-
-                 "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\",\"channel\":%d}",
-
-                 ap_list[i].ssid, ap_list[i].rssi,
-
-                 auth_type_str[auth_idx], ap_list[i].primary);
-
-        strcat(response, ap_json);
-
+        int n = snprintf(response + off, sizeof(response) - off,
+                         "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\",\"channel\":%d}",
+                         (i > 0 ? "," : ""),
+                         (const char *)ap_list[i].ssid, ap_list[i].rssi,
+                         auth_type_str[auth_idx], ap_list[i].primary);
+        if (n < 0) break;
+        off += n;
     }
-
-    strcat(response, "]}");
-
-
-
-    httpd_resp_send(req, response, strlen(response));
-
+    if (off > 0 && off < (int)sizeof(response) - 3) {
+        snprintf(response + off, sizeof(response) - off, "]}");
+    }
+    httpd_resp_sendstr(req, response);
     return ESP_OK;
-
 }
+
 
 
 
@@ -310,6 +277,18 @@ static esp_err_t root_handler(httpd_req_t *req) {
 
     return ESP_OK;
 
+}
+
+/* ==================== 内部包装（供 wifi_manager.c 使用） ==================== */
+
+esp_err_t wifi_webserver_start_internal(void)
+{
+    return wifi_webserver_start();
+}
+
+esp_err_t wifi_webserver_stop_internal(void)
+{
+    return wifi_webserver_stop();
 }
 
 
@@ -645,6 +624,7 @@ esp_err_t wifi_webserver_start(void) {
     config.ctrl_port = 32768;
 
     config.max_uri_handlers = 16;   /* 默认 8 个槽位不够（webserver 4 + captive_portal 9），扩到 16 */
+    config.stack_size = 8192;       /* scan_handler 结果缓冲较大，默认 4KB 栈会溢出 */
 
 
 
