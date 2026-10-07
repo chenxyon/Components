@@ -12,6 +12,18 @@ menu "WIFI Manager Configuration"
             bool "Screen configuration (Reserved)"
     endchoice
 
+    config WIFI_MGR_DEV_MODE
+        bool "Development mode: clear WiFi config on every flash"
+        default y
+        help
+            When enabled (development), WiFi SSID/password saved in NVS
+            will be erased on every startup, forcing the device into
+            configuration portal mode after each firmware flash.
+
+            When disabled (production), existing WiFi credentials are
+            preserved across firmware updates; the device connects
+            automatically to the previously configured AP.
+
     config WIFI_MANAGER_MAX_RETRY_COUNT
         int "Maximum retry count"
         default 3

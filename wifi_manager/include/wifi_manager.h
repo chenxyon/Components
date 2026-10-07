@@ -38,14 +38,14 @@ typedef enum {
 /* ==================== 事件类型 ==================== */
 
 typedef enum {
-    WIFI_EV_AP_STARTED,      /* SoftAP + Web 页面已就绪 */
-    WIFI_EV_CONNECTING,      /* 开始尝试 STA 连接 */
-    WIFI_EV_CONNECTED,       /* STA 已关联热点（还未拿到 IP）*/
-    WIFI_EV_GOT_IP,          /* 拿到 IP，连接成功 */
-    WIFI_EV_DISCONNECTED,    /* STA 断开连接 */
-    WIFI_EV_FALLBACK,        /* 重试耗尽，自动回落 AP 配网模式 */
-    WIFI_EV_SAVED,           /* 用户从 Web 页提交了新的 WiFi 配置 */
-} wifi_event_t;
+    WIFI_MGR_EV_AP_STARTED,      /* SoftAP + Web 页面已就绪 */
+    WIFI_MGR_EV_CONNECTING,      /* 开始尝试 STA 连接 */
+    WIFI_MGR_EV_CONNECTED,       /* STA 已关联热点（还未拿到 IP）*/
+    WIFI_MGR_EV_GOT_IP,          /* 拿到 IP，连接成功 */
+    WIFI_MGR_EV_DISCONNECTED,    /* STA 断开连接 */
+    WIFI_MGR_EV_FALLBACK,        /* 重试耗尽，自动回落 AP 配网模式 */
+    WIFI_MGR_EV_SAVED,           /* 用户从 Web 页提交了新的 WiFi 配置 */
+} wifi_mgr_event_t;
 
 /* ==================== 回调函数 ==================== */
 
@@ -55,7 +55,7 @@ typedef enum {
  * @param event  事件类型
  * @param ctx    注册时传入的用户上下文
  */
-typedef void (*wifi_manager_event_cb_t)(wifi_event_t event, void *ctx);
+typedef void (*wifi_manager_event_cb_t)(wifi_mgr_event_t event, void *ctx);
 
 /* ==================== 状态结构体 ==================== */
 
@@ -158,28 +158,16 @@ esp_err_t wifi_manager_stop_config_portal(void);
  */
 wifi_manager_mode_t wifi_manager_get_mode(void);
 
-/* ==================== 扫描 ==================== */
+/* ==================== 扫描（同步阻塞） ==================== */
 
 /**
- * @brief  启动非阻塞扫描（结果通过 WIFI_EV_GOT_IP 后的 scan 接口获取）
+ * @brief  同步阻塞扫描，等待完成后再返回结果（约 12-15 秒）
  *
- * @note   必须在 AP 模式下调用（WIFI_MODE_APSTA），STA 模式扫描返回错误
+ * @param buf        输出：ap_record 数组（调用方需分配，最多 max_count 条）
+ * @param max_count  输入：数组容量；输出：实际扫描到的 AP 数量
+ * @return ESP_OK / 其他错误码
  */
-esp_err_t wifi_manager_scan_start(void);
-
-/**
- * @brief  查询扫描是否进行中
- */
-bool wifi_manager_scan_is_running(void);
-
-/**
- * @brief  获取扫描结果
- *
- * @param ap_list  输出：ap_record 数组（调用方需分配，最多 max_count 条）
- * @param max_count 输入：数组容量；输出：实际条数
- * @return ESP_OK / ESP_ERR_NOT_FINISHED / ESP_ERR_NOT_FOUND
- */
-esp_err_t wifi_manager_scan_get_results(wifi_ap_record_t *ap_list, uint16_t *max_count);
+esp_err_t wifi_manager_scan_all(wifi_ap_record_t *buf, uint16_t max_count, uint16_t *out_count);
 
 /* ==================== NVS 配置 ==================== */
 

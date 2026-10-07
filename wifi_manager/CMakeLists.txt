@@ -1,13 +1,7 @@
 idf_component_register(
     SRCS
         "src/wifi_manager.c"
-        "src/wifi_config.c"
-        "src/wifi_scan.c"
-        "src/wifi_time_sync.c"
-        "src/wifi_config_mode.c"
-        "src/wifi_softap.c"
         "src/wifi_webserver.c"
-        "src/wifi_screen_ui.c"
         "src/captive_portal.c"
     INCLUDE_DIRS "include"
     REQUIRES
@@ -17,8 +11,9 @@ idf_component_register(
         nvs_flash
         lwip
         esp_http_server
+        esp_timer
 )
 
 message(STATUS "=================================================")
-message(STATUS "WiFi Manager Component v2.0 (merged wifi_prov)")
+message(STATUS "WiFi Manager Component v2.1")
 message(STATUS "=================================================")

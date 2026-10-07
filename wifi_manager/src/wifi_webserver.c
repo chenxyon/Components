@@ -13,6 +13,8 @@
 #include <esp_log.h>
 #include <string.h>
 #include <stdlib.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "wifi_webserver_internal.h"
 #include "captive_portal.h"
@@ -24,7 +26,7 @@ httpd_handle_t wifi_webserver_handle(void) { return s_server; }
 
 static void wifi_connect_wrapper(void *arg) {
     (void)arg;
-    wifi_connect();
+    wifi_manager_sta_connect();
     vTaskDelete(NULL);
 }
 
@@ -43,14 +45,18 @@ body { font-family: "Microsoft YaHei",sans-serif; background: linear-gradient(13
 h1 { text-align:center; color:#333; margin-bottom:20px; }
 .btn-scan { width:100%; padding:12px; background:#28a745; color:#fff; border:none; border-radius:8px; font-size:16px; cursor:pointer; margin-bottom:12px; }
 .btn-scan:hover { background:#218838; }
-.btn-save { width:100%; padding:12px; background:#007bff; color:#fff; border:none; border-radius:8px; font-size:16px; cursor:pointer; margin-bottom:10px; }
+.btn-save { width:100%; padding:12px; background:#007bff; color:#fff; border:none; border-radius:8px; font-size:16px; margin-bottom:10px; }
 .btn-save:hover { background:#0056b3; }
-label { display:block; margin:10px 0 4px; color:#555; font-size:14px; }
-input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:6px; font-size:15px; }
-.wifi-list { max-height:220px; overflow-y:auto; margin-bottom:12px; }
-.wifi-item { padding:10px 12px; border:1px solid #ddd; border-radius:6px; margin-bottom:6px; cursor:pointer; }
+.label-row { display:flex; align-items:center; justify-content:space-between; margin:10px 0 4px; }
+.label-row label { margin:0; }
+.pwd-toggle { background:none; border:none; font-size:13px; color:#007bff; cursor:pointer; padding:2px 6px; }
+.pwd-toggle:hover { text-decoration:underline; }
+input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:6px; font-size:15px; box-sizing:border-box; }
+.wifi-list { max-height:180px; overflow-y:auto; margin-bottom:12px; border:1px solid #eee; border-radius:6px; }
+.wifi-item { padding:10px 12px; border-bottom:1px solid #eee; cursor:pointer; }
+.wifi-item:last-child { border-bottom:none; }
 .wifi-item:hover { background:#e9f5ff; }
-.wifi-item.selected { background:#cce5ff; border-color:#007bff; }
+.wifi-item.selected { background:#cce5ff; border-left:3px solid #007bff; padding-left:9px; }
 .wifi-name { font-weight:bold; }
 .wifi-info { font-size:12px; color:#888; margin-top:2px; }
 .status { margin-top:12px; padding:10px; border-radius:6px; text-align:center; display:none; font-size:14px; }
@@ -62,21 +68,30 @@ input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1p
 <body>
 <div class="card">
 <h1>✶ WiFi 配置</h1>
-<div id="wifi-list" class="wifi-list"></div>
-<div id="scanning" class="scanning">正在扫描...</div>
 <form id="configForm">
-<label for="ssid">WiFi 名称</label>
+<div class="label-row"><label for="ssid">WiFi 名称</label></div>
 <input type="text" id="ssid" name="ssid" required>
-<label for="password">密码</label>
+<div class="label-row">
+  <label for="password">密码</label>
+  <button type="button" class="pwd-toggle" onclick="togglePwd()">👁 显示</button>
+</div>
 <input type="password" id="password" name="password">
 <button type="submit" class="btn-save">保存并连接</button>
 </form>
 <button class="btn-scan" onclick="doScan()">扫描可用 WiFi</button>
 <div id="status" class="status"></div>
+<div id="scanning" class="scanning">正在扫描...</div>
+<div id="wifi-list" class="wifi-list"></div>
 </div>
 <script>
-var sel='',scanIv=null,scanTry=0,MAX=20;
-function stopScan(){ if(scanIv){clearTimeout(scanIv);scanIv=null;} }
+var sel='';
+var pwdVisible=false;
+function togglePwd(){
+  var el=document.getElementById('password');
+  pwdVisible=!pwdVisible;
+  el.type=pwdVisible?'text':'password';
+  document.querySelector('.pwd-toggle').textContent=pwdVisible?'👁 隐藏':'👁 显示';
+}
 function showMsg(msg,color){
   document.getElementById('scanning').style.display='none';
   document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:'+color+'">'+msg+'</div>';
@@ -84,18 +99,10 @@ function showMsg(msg,color){
 function doScan(){
   document.getElementById('scanning').style.display='block';
   document.getElementById('wifi-list').innerHTML='';
-  stopScan();
-  scanTry=0; fetchScan(true);
-}
-function fetchScan(force){
-  scanTry++;
-  if(scanTry>MAX){ stopScan(); showMsg('扫描超时，请重试','#c00'); return; }
-  var url='/api/scan'+(force?'?force=1':'');
-  fetch(url,{cache:'no-store'}).then(function(r){return r.json();})
+  fetch('/api/scan',{cache:'no-store'}).then(function(r){return r.json();})
   .then(function(d){
+    document.getElementById('scanning').style.display='none';
     if(d.success&&d.aps){
-      stopScan();
-      document.getElementById('scanning').style.display='none';
       if(d.aps.length>0){
         var h='';
         d.aps.forEach(function(a){
@@ -108,14 +115,10 @@ function fetchScan(force){
       } else {
         showMsg('未扫描到可用的 WiFi','#888');
       }
-    } else if(d.scanning){
-      scanIv=setTimeout(function(){fetchScan(false);},1000);
     } else {
-      stopScan();
       showMsg('扫描失败：'+(d.error||'未知错误'),'#c00');
     }
   }).catch(function(){
-    stopScan();
     showMsg('请求失败，请刷新重试','#c00');
   });
 }
@@ -138,7 +141,24 @@ document.getElementById('configForm').addEventListener('submit',function(e){
     if(d.success){
       s.className='status success';
       s.textContent='配置已保存，正在连接...';
-      if(scanIv) clearInterval(scanIv);
+      /* 轮询连接状态：每3秒查一次，连上后显示成功 */
+      var connTry=0,connIv=setInterval(function(){
+        connTry++;
+        fetch('/api/status',{cache:'no-store'}).then(function(r){return r.json();})
+        .then(function(st){
+          if(st.connected){
+            clearInterval(connIv);
+            s.textContent='已成功连接 '+st.ssid+' ('+st.ip+')！请在手机上手动切换到该WiFi后刷新本页面';
+            s.className='status success';
+          } else if(connTry>=10){
+            clearInterval(connIv);
+            s.textContent='连接超时，请检查密码是否正确';
+            s.className='status error';
+          }
+        }).catch(function(){
+          if(connTry>=10){ clearInterval(connIv); s.textContent='请求失败，请重试'; s.className='status error'; }
+        });
+      },3000);
     } else {
       s.className='status error';
       s.textContent='保存失败:'+d.error;
@@ -156,15 +176,10 @@ doScan();
 )HTML";
 
 static const char *auth_type_str[] = {
-
-    "OPEN", "WEP", "WPA_PSK", "WPA2_PSK", "WPA_WPA2_PSK", 
-
+    "OPEN", "WEP", "WPA_PSK", "WPA2_PSK", "WPA_WPA2_PSK",
     "WPA2_ENTERPRISE", "WPA3_PSK", "WPA2_WPA3_PSK", "WAPI_PSK",
-
     "MAX"
-
 };
-
 
 
 static void set_json_response_headers(httpd_req_t *req) {
@@ -186,58 +201,24 @@ static void set_json_response_headers(httpd_req_t *req) {
 static esp_err_t scan_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "GET /api/scan");
     set_json_response_headers(req);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
-    /* 支持 ?force=1 强制重新扫描（"扫描可用 WiFi" 按钮用） */
-    bool force = false;
-    char query[64];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char val[8] = { 0 };
-        if (httpd_query_key_value(query, "force", val, sizeof(val)) == ESP_OK
-            && val[0] == '1') {
-            force = true;
-        }
-    }
-
-    if (force && !wifi_scan_is_running()) {
-        esp_err_t se = wifi_scan_start_nonblocking();
-        if (se != ESP_OK) {
-            ESP_LOGE(TAG, "force scan start failed: %s", esp_err_to_name(se));
-            httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan start failed\"}");
-            return ESP_OK;
-        }
-    }
-
-    /* 结果数组放 static：wifi_ap_record_t[20] 约 2.2KB + 响应缓冲约 3KB，
-       若放在 httpd 任务栈（默认仅 4KB）上会溢出，导致扫描完成后崩溃/卡死 */
-    static wifi_ap_record_t ap_list[20];
+    /* 同步阻塞扫描：直接等结果，无需轮询 */
+    wifi_ap_record_t ap_list[20];
     uint16_t ap_count = 0;
-    esp_err_t err = wifi_scan_get_ap_results(ap_list, 20, &ap_count);
-
-    if (err == ESP_ERR_NOT_FINISHED) {
-        httpd_resp_sendstr(req, "{\"success\":false,\"scanning\":true}");
-        return ESP_OK;
-    }
-
-    if (err == ESP_ERR_NOT_FOUND) {
-        esp_err_t se = wifi_scan_start_nonblocking();
-        if (se != ESP_OK && se != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "scan start failed: %s", esp_err_to_name(se));
-            httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan start failed\"}");
-            return ESP_OK;
-        }
-        httpd_resp_sendstr(req, "{\"success\":false,\"scanning\":true}");
-        return ESP_OK;
-    }
+    esp_err_t err = wifi_manager_scan_all(ap_list, 20, &ap_count);
 
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "扫描失败: %s", esp_err_to_name(err));
         httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"scan failed\"}");
         return ESP_OK;
     }
 
-    /* 构建 JSON，带边界检查，避免长 SSID/多 AP 时溢出 */
+    /* 构建 JSON */
     static char response[3072];
     int off = snprintf(response, sizeof(response), "{\"success\":true,\"aps\":[");
-    for (int i = 0; i < ap_count && off > 0 && off < (int)sizeof(response) - 220; i++) {
+    for (int i = 0; i < (int)ap_count && off > 0 && off < (int)sizeof(response) - 220; i++) {
         int auth_idx = ap_list[i].authmode < 9 ? ap_list[i].authmode : 8;
         int n = snprintf(response + off, sizeof(response) - off,
                          "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":\"%s\",\"channel\":%d}",
@@ -250,6 +231,8 @@ static esp_err_t scan_handler(httpd_req_t *req) {
     if (off > 0 && off < (int)sizeof(response) - 3) {
         snprintf(response + off, sizeof(response) - off, "]}");
     }
+
+    ESP_LOGI(TAG, "scan response: %d APs, len=%d", ap_count, off);
     httpd_resp_sendstr(req, response);
     return ESP_OK;
 }
@@ -269,6 +252,33 @@ static esp_err_t scan_handler(httpd_req_t *req) {
 
  */
 
+static esp_err_t status_handler(httpd_req_t *req)
+{
+    set_json_response_headers(req);
+
+    char buf[256];
+    int off = 0;
+    bool connected = wifi_manager_is_connected();
+
+    if (connected) {
+        wifi_status_t st;
+        const char *ip  = "unknown";
+        const char *ssid = "?";
+        if (wifi_manager_get_status(&st) == ESP_OK) {
+            ip   = st.ip_address;
+            ssid = st.ssid;
+        }
+        off = snprintf(buf, sizeof(buf),
+                       "{\"connected\":true,\"ip\":\"%s\",\"ssid\":\"%s\"}",
+                       ip, ssid);
+    } else {
+        off = snprintf(buf, sizeof(buf), "{\"connected\":false}");
+    }
+
+    httpd_resp_send(req, buf, off);
+    return ESP_OK;
+}
+
 static esp_err_t root_handler(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html");
@@ -278,6 +288,10 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 
 }
+
+/* 前向声明 */
+static esp_err_t wifi_webserver_start(void);
+static esp_err_t wifi_webserver_stop(void);
 
 /* ==================== 内部包装（供 wifi_manager.c 使用） ==================== */
 
@@ -459,23 +473,8 @@ static esp_err_t config_handler(httpd_req_t *req) {
 
 
 
-    /* 构建WIFI配置结构体 */
-
-    wifi_saved_config_t config = {
-
-        .saved = true,
-
-    };
-
-    strncpy(config.ssid, ssid, sizeof(config.ssid) - 1);
-
-    strncpy(config.password, password, sizeof(config.password) - 1);
-
-
-
     /* 保存WIFI配置 */
-
-    esp_err_t err = wifi_config_save(&config);
+    esp_err_t err = wifi_manager_save_config(ssid, password);
 
     if (err != ESP_OK) {
 
@@ -495,9 +494,8 @@ static esp_err_t config_handler(httpd_req_t *req) {
 
     /* 在新任务中尝试连接WIFI */
 
-    xTaskCreatePinnedToCore((void(*)(void*))wifi_connect_wrapper, "wifi_connect_task", 
-
-                            4096, NULL, 5, NULL, 0);
+    xTaskCreate(wifi_connect_wrapper, "wifi_connect_task",
+                4096, NULL, 5, NULL);
 
 
 
@@ -548,6 +546,18 @@ static const httpd_uri_t scan_uri = {
     .method = HTTP_GET,
 
     .handler = scan_handler,
+
+    .user_ctx = NULL
+
+};
+
+static const httpd_uri_t status_uri = {
+
+    .uri = "/api/status",
+
+    .method = HTTP_GET,
+
+    .handler = status_handler,
 
     .user_ctx = NULL
 
@@ -647,6 +657,8 @@ esp_err_t wifi_webserver_start(void) {
     httpd_register_uri_handler(s_server, &config_uri);
 
     httpd_register_uri_handler(s_server, &scan_uri);
+
+    httpd_register_uri_handler(s_server, &status_uri);
 
     httpd_register_uri_handler(s_server, &options_config_uri);
 

@@ -18,6 +18,8 @@
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_timer.h>
+#include <lwip/apps/sntp.h>
 
 #include <string.h>
 
@@ -29,12 +31,6 @@ static wifi_manager_mode_t s_mode     = WIFI_MGR_MODE_AUTO;
 
 static uint8_t          s_retry_count = 0;
 static bool             s_ap_started  = false;
-static bool             s_scan_running = false;
-static bool             s_scan_done    = false;
-static uint32_t         s_scan_start_ms = 0;
-static wifi_ap_record_t s_scan_buf[20];
-static uint16_t         s_scan_count   = 0;
-#define SCAN_TIMEOUT_MS 15000
 
 /* 回调 */
 static wifi_manager_event_cb_t s_event_cb    = NULL;
@@ -44,7 +40,7 @@ static void                   *s_event_cb_ctx = NULL;
 static wifi_manager_config_t s_cfg;
 
 /* ==================== 事件派发 ==================== */
-static void emit_event(wifi_event_t ev)
+static void emit_event(wifi_mgr_event_t ev)
 {
     if (s_event_cb != NULL) {
         s_event_cb(ev, s_event_cb_ctx);
@@ -60,25 +56,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     switch (id) {
     case WIFI_EVENT_STA_START:
-        emit_event(WIFI_EV_CONNECTING);
+        emit_event(WIFI_MGR_EV_CONNECTING);
         break;
 
     case WIFI_EVENT_STA_CONNECTED:
-        emit_event(WIFI_EV_CONNECTED);
+        emit_event(WIFI_MGR_EV_CONNECTED);
         ESP_LOGI(TAG, "已关联热点，等待获取 IP …");
         break;
 
     case WIFI_EVENT_STA_DISCONNECTED:
-        emit_event(WIFI_EV_DISCONNECTED);
+        emit_event(WIFI_MGR_EV_DISCONNECTED);
         if (s_mode == WIFI_MGR_MODE_AUTO && !s_ap_started) {
             s_retry_count++;
             ESP_LOGW(TAG, "断开，重试 %u/%u",
                      s_retry_count, s_cfg.max_retry);
             if (s_retry_count >= s_cfg.max_retry && s_cfg.max_retry != 0) {
                 ESP_LOGW(TAG, "重试耗尽，进入配网模式");
-                emit_event(WIFI_EV_FALLBACK);
+                emit_event(WIFI_MGR_EV_FALLBACK);
                 s_ap_started = true;
-                wifi_config_mode_start_internal(2);  /* WIFI_CONFIG_MODE_WEB */
+                wifi_manager_start_config_portal();
             } else if (s_cfg.auto_reconnect) {
                 vTaskDelay(pdMS_TO_TICKS(s_cfg.retry_interval_ms));
                 esp_wifi_connect();
@@ -90,23 +86,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     case WIFI_EVENT_AP_START:
         s_ap_started = true;
-        emit_event(WIFI_EV_AP_STARTED);
+        emit_event(WIFI_MGR_EV_AP_STARTED);
         break;
-
-    case WIFI_EVENT_SCAN_DONE:
-    {
-        s_scan_running = false;
-        s_scan_done    = true;
-        wifi_event_sta_scan_done_t *evt =
-            (wifi_event_sta_scan_done_t *)data;
-        if (evt->status == ESP_OK) {
-            uint16_t n = sizeof(s_scan_buf) / sizeof(s_scan_buf[0]);
-            esp_wifi_scan_get_ap_records(&n, s_scan_buf);
-            s_scan_count = n;
-            ESP_LOGI(TAG, "扫描完成，发现 %u 个 AP", s_scan_count);
-        }
-        break;
-    }
 
     default:
         break;
@@ -120,18 +101,15 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     if (base != IP_EVENT || id != IP_EVENT_STA_GOT_IP) return;
 
     s_retry_count = 0;
-    emit_event(WIFI_EV_GOT_IP);
+    emit_event(WIFI_MGR_EV_GOT_IP);
 
-    /* STA 连上后切回 STA-only，关 AP */
-    wifi_mode_t m = WIFI_MODE_NULL;
-    if (esp_wifi_get_mode(&m) == ESP_OK && m == WIFI_MODE_APSTA) {
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_stop();
-        esp_wifi_start();
-        s_ap_started = false;
+    /* 拿到 IP 后：不恢复 AP（AP 会占用信道，干扰 STA），只启动 Webserver */
+    if (!s_ap_started) {
+        wifi_webserver_start_internal();
+        ESP_LOGI(TAG, "已连上路由器，Webserver 启动在 STA IP");
     }
 
-    /* NTP */
+    /* NTP：连上后启动时间同步 */
     if (s_cfg.enable_ntp && s_cfg.ntp_server != NULL) {
         sntp_setservername(0, (char *)s_cfg.ntp_server);
         sntp_init();
@@ -157,6 +135,15 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
     ESP_ERROR_CHECK(err);
+
+    /* 开发模式：每次启动清除已保存的 WiFi 配置，强制重新配网；
+       生产模式：保留历史配置，设备自动连接上次保存的 AP */
+#ifdef CONFIG_WIFI_MGR_DEV_MODE
+    ESP_LOGI(TAG, "开发模式：清除 NVS WiFi 配置");
+    wifi_manager_clear_config();
+#else
+    ESP_LOGI(TAG, "生产模式：保留 NVS WiFi 配置");
+#endif
 
     /* 网络栈 */
     ESP_ERROR_CHECK(esp_netif_init());
@@ -271,14 +258,14 @@ esp_err_t wifi_manager_sta_connect(void)
 {
     if (!s_ready) return ESP_ERR_INVALID_STATE;
     s_retry_count = 0;
-    s_ap_started  = false;
-
-    /* 如果当前是 AP 模式，切回 APSTA */
-    wifi_mode_t m = WIFI_MODE_NULL;
-    esp_wifi_get_mode(&m);
-    if (m == WIFI_MODE_AP) {
-        esp_wifi_set_mode(WIFI_MODE_APSTA);
-        esp_wifi_start();
+    /* 关键：连接前完全停 AP，避免双无线电信道冲突导致 STA 反复断连 */
+    bool ap_was_started = s_ap_started;
+    if (ap_was_started) {
+        wifi_webserver_stop_internal();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_stop();
+        s_ap_started = false;
+        ESP_LOGI(TAG, "连接前：已暂停 AP，纯 STA 模式");
     }
 
     /* 加载保存的密码 */
@@ -286,6 +273,12 @@ esp_err_t wifi_manager_sta_connect(void)
     if (wifi_manager_load_config(ssid, pw, sizeof(ssid), sizeof(pw)) != ESP_OK
         || ssid[0] == '\0') {
         ESP_LOGW(TAG, "无保存配置，无法连接 STA");
+        if (ap_was_started) {
+            esp_wifi_set_mode(WIFI_MODE_APSTA);
+            esp_wifi_start();
+            s_ap_started = true;
+            wifi_webserver_start_internal();
+        }
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -361,41 +354,56 @@ wifi_manager_mode_t wifi_manager_get_mode(void)
 
 /* ==================== 扫描 ==================== */
 
-esp_err_t wifi_manager_scan_start(void)
+/* ==================== 同步阻塞扫描 ==================== */
+/*
+ * 每次调用都同步执行扫描，等待完成后再返回结果。
+ * 优点：无竞态、无轮询、网络切换时也能可靠工作。
+ * 缺点：调用时会阻塞约 12-15 秒（扫描超时）。
+ */
+esp_err_t wifi_manager_scan_all(wifi_ap_record_t *buf, uint16_t max_count, uint16_t *out_count)
 {
-    if (!s_ready || s_scan_running) return ESP_ERR_INVALID_STATE;
-    s_scan_running = true;
-    s_scan_done    = false;
-    s_scan_start_ms = 0;
-    return esp_wifi_scan_start(NULL, false);
-}
+    if (!buf || !out_count) return ESP_ERR_INVALID_ARG;
 
-bool wifi_manager_scan_is_running(void)
-{
-    return s_scan_running;
-}
+    esp_wifi_scan_stop();
 
-esp_err_t wifi_manager_scan_get_results(wifi_ap_record_t *buf, uint16_t *max_count)
-{
-    if (!buf || !max_count) return ESP_ERR_INVALID_ARG;
-    if (s_scan_running) {
-        /* 超时兜底 */
-        if (s_scan_start_ms != 0) {
-            uint32_t elapsed = esp_timer_get_time() / 1000 - s_scan_start_ms;
-            if (elapsed >= SCAN_TIMEOUT_MS) {
-                s_scan_running = false;
-                s_scan_done    = true;
-                s_scan_count   = 0;
-                ESP_LOGW(TAG, "扫描超时");
-            }
-        }
-        return ESP_ERR_NOT_FINISHED;
+    /* 扫描期间临时关闭 AP，避免信道跳变导致 STA 反复断连 */
+    bool was_ap_started = s_ap_started;
+    if (s_ap_started) {
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_stop();
+        s_ap_started = false;
+        ESP_LOGI(TAG, "扫描：已暂停 AP");
     }
-    if (!s_scan_done) return ESP_ERR_NOT_FOUND;
-    uint16_t n = s_scan_count < *max_count ? s_scan_count : *max_count;
-    memcpy(buf, s_scan_buf, n * sizeof(wifi_ap_record_t));
-    *max_count = n;
-    return ESP_OK;
+
+    wifi_scan_config_t cfg = {
+        .ssid       = NULL,
+        .bssid      = NULL,
+        .channel    = 0,
+        .show_hidden = false,
+        .scan_type  = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time  = { .active.min = 100, .active.max = 300 },
+    };
+
+    esp_err_t err = esp_wifi_scan_start(&cfg, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "扫描启动失败: %s", esp_err_to_name(err));
+        goto restore;
+    }
+
+    uint16_t n = max_count < 20 ? max_count : 20;
+    err = esp_wifi_scan_get_ap_records(&n, buf);
+    *out_count = (err == ESP_OK) ? n : 0;
+    ESP_LOGI(TAG, "扫描完成，发现 %u 个 AP", *out_count);
+
+restore:
+    /* 恢复 AP */
+    if (!s_ap_started && was_ap_started) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+        esp_wifi_start();
+        s_ap_started = true;
+        ESP_LOGI(TAG, "扫描：已恢复 AP");
+    }
+    return err;
 }
 
 /* ==================== NVS 配置 ==================== */
