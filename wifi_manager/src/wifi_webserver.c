@@ -49,8 +49,16 @@ h1 { text-align:center; color:#333; margin-bottom:20px; }
 .btn-save:hover { background:#0056b3; }
 .label-row { display:flex; align-items:center; justify-content:space-between; margin:10px 0 4px; }
 .label-row label { margin:0; }
-.pwd-toggle { background:none; border:none; font-size:13px; color:#007bff; cursor:pointer; padding:2px 6px; }
-.pwd-toggle:hover { text-decoration:underline; }
+.pwd-wrap { position:relative; }
+.pwd-wrap input { padding-right:44px; }
+.pwd-eye { position:absolute; right:6px; top:50%; transform:translateY(-50%);
+  background:none; border:none; padding:4px; cursor:pointer; line-height:0; }
+.pwd-eye svg { width:22px; height:22px; stroke:#888; fill:none; stroke-width:2;
+  stroke-linecap:round; stroke-linejoin:round; }
+.pwd-eye .eye-on { display:block; }
+.pwd-eye.on .eye-on { display:none; }
+.pwd-eye .eye-off { display:none; }
+.pwd-eye.on .eye-off { display:block; }
 input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1px solid #ccc; border-radius:6px; font-size:15px; box-sizing:border-box; }
 .wifi-list { max-height:180px; overflow-y:auto; margin-bottom:12px; border:1px solid #eee; border-radius:6px; }
 .wifi-item { padding:10px 12px; border-bottom:1px solid #eee; cursor:pointer; }
@@ -71,11 +79,19 @@ input[type=text],input[type=password] { width:100%; padding:10px 12px; border:1p
 <form id="configForm">
 <div class="label-row"><label for="ssid">WiFi 名称</label></div>
 <input type="text" id="ssid" name="ssid" required>
-<div class="label-row">
-  <label for="password">密码</label>
-  <button type="button" class="pwd-toggle" onclick="togglePwd()">👁 显示</button>
+<div class="label-row"><label for="password">密码</label></div>
+<div class="pwd-wrap">
+  <input type="password" id="password" name="password">
+  <button type="button" class="pwd-eye" id="pwdEye" onclick="togglePwd()" aria-label="显示密码">
+    <svg viewBox="0 0 24 24">
+      <path class="eye-on" d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12z"/>
+      <circle class="eye-on" cx="12" cy="12" r="3"/>
+      <path class="eye-off" d="M3 3l18 18"/>
+      <path class="eye-off" d="M10.6 5.2A9.9 9.9 0 0112 5c7 0 10.5 7 10.5 7a17.6 17.6 0 01-3.3 4.1M6.4 6.4A17.3 17.3 0 001.5 12S5 19 12 19a9.7 9.7 0 004.2-.9"/>
+      <path class="eye-off" d="M9.9 9.9a3 3 0 004.2 4.2"/>
+    </svg>
+  </button>
 </div>
-<input type="password" id="password" name="password">
 <button type="submit" class="btn-save">保存并连接</button>
 </form>
 <button class="btn-scan" onclick="doScan()">扫描可用 WiFi</button>
@@ -88,9 +104,10 @@ var sel='';
 var pwdVisible=false;
 function togglePwd(){
   var el=document.getElementById('password');
+  var btn=document.getElementById('pwdEye');
   pwdVisible=!pwdVisible;
   el.type=pwdVisible?'text':'password';
-  document.querySelector('.pwd-toggle').textContent=pwdVisible?'👁 隐藏':'👁 显示';
+  btn.classList.toggle('on', pwdVisible);
 }
 function showMsg(msg,color){
   document.getElementById('scanning').style.display='none';
@@ -140,25 +157,18 @@ document.getElementById('configForm').addEventListener('submit',function(e){
     var s=document.getElementById('status');
     if(d.success){
       s.className='status success';
-      s.textContent='配置已保存，正在连接...';
-      /* 轮询连接状态：每3秒查一次，连上后显示成功 */
-      var connTry=0,connIv=setInterval(function(){
-        connTry++;
+      s.textContent='配置已保存，正在连接…请将手机切换到目标 WiFi';
+      /* AP 已停止，手机要连新 WiFi 才能访问 ESP；
+         因此不再原地轮询，而是引导用户切换网络后打开新 IP 的成功页 */
+      var connIv=setInterval(function(){
         fetch('/api/status',{cache:'no-store'}).then(function(r){return r.json();})
         .then(function(st){
           if(st.connected){
             clearInterval(connIv);
-            s.textContent='已成功连接 '+st.ssid+' ('+st.ip+')！请在手机上手动切换到该WiFi后刷新本页面';
-            s.className='status success';
-          } else if(connTry>=10){
-            clearInterval(connIv);
-            s.textContent='连接超时，请检查密码是否正确';
-            s.className='status error';
+            location.href='http://'+st.ip+'/success';
           }
-        }).catch(function(){
-          if(connTry>=10){ clearInterval(connIv); s.textContent='请求失败，请重试'; s.className='status error'; }
-        });
-      },3000);
+        }).catch(function(){});
+      },2000);
     } else {
       s.className='status error';
       s.textContent='保存失败:'+d.error;
@@ -180,6 +190,31 @@ static const char *auth_type_str[] = {
     "WPA2_ENTERPRISE", "WPA3_PSK", "WPA2_WPA3_PSK", "WAPI_PSK",
     "MAX"
 };
+
+/* 连接成功后展示的简单页面 */
+static const char *SUCCESS_PAGE =
+"<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+"<title>连接成功</title><style>"
+"body{font-family:\"Microsoft YaHei\",sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);"
+"min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0}"
+".card{background:#fff;border-radius:12px;padding:32px 24px;width:88%;max-width:400px;"
+"text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.18)}"
+".icon{width:64px;height:64px;border-radius:50%;background:#28a745;color:#fff;"
+"font-size:36px;line-height:64px;margin:0 auto 16px}"
+"h1{color:#28a745;font-size:22px;margin:0 0 8px}"
+".ssid{color:#333;font-size:17px;margin:6px 0}"
+".ip{color:#888;font-size:14px;margin:4px 0}"
+"</style></head><body><div class=\"card\">"
+"<div class=\"icon\">&#10003;</div>"
+"<h1>连接成功</h1>"
+"<div class=\"ssid\" id=\"ssid\">-</div>"
+"<div class=\"ip\" id=\"ip\">-</div>"
+"</div><script>fetch('/api/status',{cache:'no-store'})"
+".then(function(r){return r.json();}).then(function(d){"
+"if(d.connected){document.getElementById('ssid').textContent='WiFi：'+d.ssid;"
+"document.getElementById('ip').textContent='IP：'+d.ip;}}).catch(function(){});"
+"</script></body></html>";
 
 
 static void set_json_response_headers(httpd_req_t *req) {
@@ -287,6 +322,13 @@ static esp_err_t root_handler(httpd_req_t *req) {
 
     return ESP_OK;
 
+}
+
+static esp_err_t success_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, SUCCESS_PAGE, strlen(SUCCESS_PAGE));
+    return ESP_OK;
 }
 
 /* 前向声明 */
@@ -563,6 +605,18 @@ static const httpd_uri_t status_uri = {
 
 };
 
+static const httpd_uri_t success_uri = {
+
+    .uri = "/success",
+
+    .method = HTTP_GET,
+
+    .handler = success_handler,
+
+    .user_ctx = NULL
+
+};
+
 
 
 static esp_err_t options_handler(httpd_req_t *req) {
@@ -659,6 +713,8 @@ esp_err_t wifi_webserver_start(void) {
     httpd_register_uri_handler(s_server, &scan_uri);
 
     httpd_register_uri_handler(s_server, &status_uri);
+
+    httpd_register_uri_handler(s_server, &success_uri);
 
     httpd_register_uri_handler(s_server, &options_config_uri);
 
