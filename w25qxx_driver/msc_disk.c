@@ -25,11 +25,11 @@ int32_t msc_write_sectors(uint32_t lba, uint32_t sector_count, uint8_t *buf) {
 
 uint32_t msc_get_sector_count(void) {
     if (!s_w25qxx_cfg) return 0;
-    return s_w25qxx_cfg->info.total_size / 4096;
+    return s_w25qxx_cfg->info.total_size / 512;  /* 与 diskio 的 GET_SECTOR_SIZE = 512 对齐 */
 }
 
 uint32_t msc_get_sector_size(void) {
-    return 4096;  // W25QXX扇区大小为4KB
+    return 512;  /* USB MSC 标准扇区 512B，与 diskio 保持一致；原 4096 会导致 LBA 计算差 8 倍 */
 }
 
 uint32_t msc_get_block_size(void) {

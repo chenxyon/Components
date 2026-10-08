@@ -5,7 +5,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
-#include "string.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include "ff.h"
 
 static const char *TAG = "w25qxx_cli";
@@ -164,9 +167,10 @@ static void cli_cmd_read_file(char *args) {
         return;
     }
     
-    char path[128] = "0:";
-    strcat(path, args);
-    
+    /* 用 snprintf 替代 strcat：args 最长可达 224 字节，直接拼接会溢出 path */
+    char path[128];
+    snprintf(path, sizeof(path), "0:%s", args);
+
     FIL file;
     FRESULT ret = f_open(&file, path, FA_READ);
     if (ret != FR_OK) {
@@ -194,9 +198,10 @@ static void cli_cmd_write_file(char *args) {
         return;
     }
     
-    char path[128] = "0:";
-    strcat(path, args);
-    
+    /* 用 snprintf 替代 strcat：防止 args 超长导致栈溢出 */
+    char path[128];
+    snprintf(path, sizeof(path), "0:%s", args);
+
     cli_print("Enter file content (press Enter to finish):\n");
     
     char content[512] = {0};
@@ -239,11 +244,10 @@ static void cli_cmd_list(char *args) {
         return;
     }
     
-    char path[128] = "0:";
-    if (args[0] != '\0') {
-        strcat(path, args);
-    }
-    
+    /* 用 snprintf 替代 strcat：防止 args 超长导致栈溢出 */
+    char path[128];
+    snprintf(path, sizeof(path), "0:%s", args);
+
     FRESULT ret;
     DIR dir;
     FILINFO fno;
@@ -329,7 +333,8 @@ void w25qxx_cli_task(void *arg) {
     
     char input[CLI_BUFFER_SIZE];
     char cmd[32];
-    char args[CLI_BUFFER_SIZE - 32];
+    char args[CLI_BUFFER_SIZE - 32] = {0};  /* 必须初始化：无参数命令下 sscanf 不会写入，
+                                             未初始化会导致后续读取栈垃圾并溢出 */
     
     cli_print("\nW25QXX CLI Ready. Type 'help' for commands.\n");
     cli_print("> ");
@@ -361,6 +366,7 @@ void w25qxx_cli_task(void *arg) {
         cli_print("\n");
         
         // 解析命令
+        args[0] = '\0';  /* 每轮清空，避免上一条命令的参数残留 */
         if (sscanf(input, "%31s %[^\n]", cmd, args) < 1) {
             cli_print("> ");
             continue;

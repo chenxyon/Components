@@ -5,6 +5,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <inttypes.h>
 
 static const char *TAG = "w25qxx";
 
@@ -31,7 +34,7 @@ static const char *TAG = "w25qxx";
 #define W25QXX_CMD_SECTOR_ERASE_4BYTE  0x21
 #define W25QXX_CMD_BLOCK_ERASE_64K_4BYTE 0xDC
 
-#define W25QXX_PAGE_PROGRAM_TIMEOUT_MS  10
+#define W25QXX_PAGE_PROGRAM_TIMEOUT_MS  100  /* 页编程最坏 3ms；FreeRTOS tick 误差+WEL 复查，留 100ms 余量 */
 #define W25QXX_SECTOR_ERASE_TIMEOUT_MS  3000
 #define W25QXX_BLOCK_ERASE_TIMEOUT_MS   10000
 #define W25QXX_CHIP_ERASE_TIMEOUT_MS    180000
@@ -78,11 +81,17 @@ static bool w25qxx_write_command_addr_data(w25qxx_config_t *config, uint8_t cmd,
     }
     memcpy(tx_data + 1 + addr_len, data, len);
 
-    /* DEBUG: log first 8 bytes of TX data */
-    ESP_LOGI(TAG, "[DEBUG] PageProgram TX (%lu bytes): %02X %02X %02X %02X %02X %02X %02X %02X",
-             (unsigned long)tx_len,
-             tx_data[0], tx_data[1], tx_data[2], tx_data[3],
-             tx_data[4], tx_data[5], tx_data[6], tx_data[7]);
+    /* DEBUG: 逐字节打印实际长度内的数据，避免访问 tx_data 越界 */
+    {
+        char hex[8 * 3 + 1] = {0};
+        uint32_t show = tx_len < 8 ? tx_len : 8;
+        for (uint32_t i = 0; i < show; i++) {
+            snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02X%s",
+                     tx_data[i], (i + 1 < show) ? " " : "");
+        }
+        ESP_LOGI(TAG, "[DEBUG] PageProgram TX (%lu bytes, 前 %u): %s",
+                 (unsigned long)tx_len, (unsigned)show, hex);
+    }
 
     bool ok = w25qxx_spi_write_then_read(config, tx_data, tx_len, NULL, 0);
     free(tx_data);
@@ -339,10 +348,10 @@ bool w25qxx_write(w25qxx_config_t *config, uint32_t addr, const uint8_t *data, u
             return false;
         }
 
-        /* DEBUG: read status immediately after Page Program */
+        /* 状态诊断日志降级为 ESP_LOGD：生产环境串口输出会严重拖慢页编程 */
         uint8_t sr_after_pp = 0;
         w25qxx_read_status_reg(config, &sr_after_pp);
-        ESP_LOGI(TAG, "[DEBUG] SR after PageProgram: 0x%02X (WIP=%d WEL=%d)",
+        ESP_LOGD(TAG, "[DEBUG] SR after PageProgram: 0x%02X (WIP=%d WEL=%d)",
                  sr_after_pp, sr_after_pp & 0x01, (sr_after_pp >> 1) & 1);
 
         if (!w25qxx_wait_busy_timeout(config, W25QXX_PAGE_PROGRAM_TIMEOUT_MS)) {
@@ -350,10 +359,9 @@ bool w25qxx_write(w25qxx_config_t *config, uint32_t addr, const uint8_t *data, u
             return false;
         }
 
-        /* DEBUG: read status after wait_busy_timeout */
         uint8_t sr_after_wait = 0;
         w25qxx_read_status_reg(config, &sr_after_wait);
-        ESP_LOGI(TAG, "[DEBUG] SR after wait_busy: 0x%02X (WIP=%d WEL=%d)",
+        ESP_LOGD(TAG, "[DEBUG] SR after wait_busy: 0x%02X (WIP=%d WEL=%d)",
                  sr_after_wait, sr_after_wait & 0x01, (sr_after_wait >> 1) & 1);
 
         bytes_written += bytes_to_write;
@@ -364,7 +372,12 @@ bool w25qxx_write(w25qxx_config_t *config, uint32_t addr, const uint8_t *data, u
 }
 
 bool w25qxx_erase_sector(w25qxx_config_t *config, uint32_t addr) {
-    if (config == NULL || addr >= config->info.total_size) {
+    if (config == NULL || addr >= config->info.total_size) return false;
+
+    /* 校验 4KB 对齐：不对齐的擦除会破坏相邻扇区，属于编程错误 */
+    if (addr % W25QXX_SECTOR_SIZE != 0) {
+        ESP_LOGE(TAG, "erase_sector: addr 0x%08lX 未按 %u 字节对齐",
+                 (unsigned long)addr, W25QXX_SECTOR_SIZE);
         return false;
     }
 
@@ -395,7 +408,12 @@ bool w25qxx_erase_sector(w25qxx_config_t *config, uint32_t addr) {
 }
 
 bool w25qxx_erase_block(w25qxx_config_t *config, uint32_t addr) {
-    if (config == NULL || addr >= config->info.total_size) {
+    if (config == NULL || addr >= config->info.total_size) return false;
+
+    /* 校验 64KB 对齐 */
+    if (addr % W25QXX_BLOCK_SIZE != 0) {
+        ESP_LOGE(TAG, "erase_block: addr 0x%08lX 未按 %u 字节对齐",
+                 (unsigned long)addr, W25QXX_BLOCK_SIZE);
         return false;
     }
 
