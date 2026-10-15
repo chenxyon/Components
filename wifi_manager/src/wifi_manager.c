@@ -242,6 +242,9 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
 
     memcpy(&s_cfg, config, sizeof(s_cfg));
     s_mode = config->mode;
+    /* 接上配置里带的回调（也可用 wifi_manager_set_event_cb 动态替换） */
+    s_event_cb     = config->event_cb;
+    s_event_cb_ctx = config->event_cb_ctx;
 
     /* NVS */
     esp_err_t err = nvs_flash_init();
