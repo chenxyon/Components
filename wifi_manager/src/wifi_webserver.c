@@ -113,10 +113,16 @@ function showMsg(msg,color){
   document.getElementById('scanning').style.display='none';
   document.getElementById('wifi-list').innerHTML='<div style="text-align:center;color:'+color+'">'+msg+'</div>';
 }
-function doScan(){
+function doScan(retry){
   document.getElementById('scanning').style.display='block';
   document.getElementById('wifi-list').innerHTML='';
-  fetch('/api/scan',{cache:'no-store'}).then(function(r){return r.json();})
+  var ctrl=new AbortController();
+  var to=setTimeout(function(){ctrl.abort();},20000);
+  fetch('/api/scan',{cache:'no-store',signal:ctrl.signal}).then(function(r){
+    clearTimeout(to);
+    if(!r.ok) throw new Error('http '+r.status);
+    return r.json();
+  })
   .then(function(d){
     document.getElementById('scanning').style.display='none';
     if(d.success&&d.aps){
@@ -132,11 +138,18 @@ function doScan(){
       } else {
         showMsg('未扫描到可用的 WiFi','#888');
       }
+    } else if(d.scanning){
+      setTimeout(function(){doScan();},1500);
     } else {
-      showMsg('扫描失败：'+(d.error||'未知错误'),'#c00');
+      showMsg('扫描失败：'+(d.error||'未知错误')+'，<a href="javascript:doScan()">点此重试</a>','#c00');
     }
-  }).catch(function(){
-    showMsg('请求失败，请刷新重试','#c00');
+  }).catch(function(e){
+    clearTimeout(to);
+    if(!retry||retry<2){
+      setTimeout(function(){doScan((retry||0)+1);},1500);
+    } else {
+      showMsg('请求失败（'+(e&&e.name==='AbortError'?'超时':'网络中断')+'），<a href="javascript:doScan()">点此重试</a>','#c00');
+    }
   });
 }
 function pick(ssid){
@@ -157,17 +170,23 @@ document.getElementById('configForm').addEventListener('submit',function(e){
     var s=document.getElementById('status');
     if(d.success){
       s.className='status success';
-      s.textContent='配置已保存，正在连接…请将手机切换到目标 WiFi';
-      /* AP 已停止，手机要连新 WiFi 才能访问 ESP；
-         因此不再原地轮询，而是引导用户切换网络后打开新 IP 的成功页 */
-      var connIv=setInterval(function(){
+      s.textContent='配置已保存，正在连接…';
+      /* AP 保持运行，手机无需切换网络，原地轮询即可看到结果 */
+      var connTry=0,connIv=setInterval(function(){
+        connTry++;
         fetch('/api/status',{cache:'no-store'}).then(function(r){return r.json();})
         .then(function(st){
           if(st.connected){
             clearInterval(connIv);
-            location.href='http://'+st.ip+'/success';
+            s.textContent='已成功连接 '+st.ssid+'（设备 IP：'+st.ip+'），配网完成';
+          } else if(connTry>=30){
+            clearInterval(connIv);
+            s.textContent='连接超时，请检查密码是否正确';
+            s.className='status error';
           }
-        }).catch(function(){});
+        }).catch(function(){
+          if(connTry>=30){ clearInterval(connIv); }
+        });
       },2000);
     } else {
       s.className='status error';
@@ -210,10 +229,21 @@ static const char *SUCCESS_PAGE =
 "<h1>连接成功</h1>"
 "<div class=\"ssid\" id=\"ssid\">-</div>"
 "<div class=\"ip\" id=\"ip\">-</div>"
+"<div style=\"margin-top:14px;text-align:left\">"
+"<button onclick=\"loadLogs()\" style=\"width:100%;padding:10px;border:none;border-radius:8px;background:#6c757d;color:#fff;font-size:15px\">查看设备日志</button>"
+"<pre id=\"logs\" style=\"display:none;max-height:300px;overflow-y:auto;background:#1e1e1e;color:#d4d4d4;"
+"font-size:11px;padding:10px;border-radius:6px;white-space:pre-wrap;word-break:break-all\"></pre>"
+"</div>"
 "</div><script>fetch('/api/status',{cache:'no-store'})"
 ".then(function(r){return r.json();}).then(function(d){"
 "if(d.connected){document.getElementById('ssid').textContent='WiFi：'+d.ssid;"
 "document.getElementById('ip').textContent='IP：'+d.ip;}}).catch(function(){});"
+"function loadLogs(){var el=document.getElementById('logs');"
+"if(el.style.display!=='none'){el.style.display='none';return;}"
+"el.style.display='block';el.textContent='加载中…';"
+"fetch('/api/logs?n=120',{cache:'no-store'}).then(function(r){return r.json();})"
+".then(function(a){el.textContent=a.join('\\n')||'(空)';el.scrollTop=el.scrollHeight;})"
+".catch(function(e){el.textContent='加载失败:'+e;});}"
 "</script></body></html>";
 
 
@@ -311,6 +341,32 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
 
     httpd_resp_send(req, buf, off);
+    return ESP_OK;
+}
+
+/* GET /api/logs?n=60：返回环形日志缓存，STA IP 上也可查 */
+static esp_err_t logs_handler(httpd_req_t *req)
+{
+    set_json_response_headers(req);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+
+    uint16_t n = 60;
+    char query[32];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[8] = { 0 };
+        if (httpd_query_key_value(query, "n", val, sizeof(val)) == ESP_OK) {
+            int v = atoi(val);
+            if (v > 0 && v <= 120) n = (uint16_t)v;
+        }
+    }
+
+    /* 120 行 x ~200 字符 ≈ 24KB，httpd 任务栈只有 8KB，必须放 static */
+    static char logs_buf[24576];
+    if (wifi_manager_get_weblog(logs_buf, sizeof(logs_buf), n) != ESP_OK) {
+        httpd_resp_sendstr(req, "[]");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, logs_buf);
     return ESP_OK;
 }
 
@@ -517,6 +573,8 @@ static esp_err_t config_handler(httpd_req_t *req) {
 
     /* 保存WIFI配置 */
     esp_err_t err = wifi_manager_save_config(ssid, password);
+    ESP_LOGI(TAG, "配置已保存: ssid=%s (密码长度 %d)，发起 STA 连接…",
+             ssid, (int)strlen(password));
 
     if (err != ESP_OK) {
 
@@ -612,6 +670,18 @@ static const httpd_uri_t success_uri = {
     .method = HTTP_GET,
 
     .handler = success_handler,
+
+    .user_ctx = NULL
+
+};
+
+static const httpd_uri_t logs_uri = {
+
+    .uri = "/api/logs",
+
+    .method = HTTP_GET,
+
+    .handler = logs_handler,
 
     .user_ctx = NULL
 
@@ -715,6 +785,8 @@ esp_err_t wifi_webserver_start(void) {
     httpd_register_uri_handler(s_server, &status_uri);
 
     httpd_register_uri_handler(s_server, &success_uri);
+
+    httpd_register_uri_handler(s_server, &logs_uri);
 
     httpd_register_uri_handler(s_server, &options_config_uri);
 

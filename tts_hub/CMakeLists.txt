@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "src/tts_hub.c"
+        "src/tts_xfyun.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        mbedtls
+)

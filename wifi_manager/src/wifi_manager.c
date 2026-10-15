@@ -11,6 +11,7 @@
  */
 #include "wifi_manager.h"
 #include "wifi_webserver_internal.h"
+#include "captive_portal.h"
 
 #include <esp_log.h>
 #include <esp_event.h>
@@ -18,12 +19,82 @@
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <esp_timer.h>
 #include <lwip/apps/sntp.h>
 
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 static const char *TAG = "wifi_mgr";
+
+/* ==================== 日志环形缓存（供 WEB /api/logs 查看） ==================== */
+#define WEBLOG_LINES  120
+#define WEBLOG_LEN    160
+static char      s_weblog[WEBLOG_LINES][WEBLOG_LEN];
+static uint16_t  s_weblog_head  = 0;   /* 下一次写入位置 */
+static uint16_t  s_weblog_count = 0;
+static SemaphoreHandle_t s_weblog_lock = NULL;
+static vprintf_like_t    s_orig_vprintf = NULL;
+
+static void weblog_push(const char *line)
+{
+    if (s_weblog_lock == NULL) return;
+    if (xSemaphoreTake(s_weblog_lock, pdMS_TO_TICKS(20)) != pdTRUE) return;
+    strncpy(s_weblog[s_weblog_head], line, WEBLOG_LEN - 1);
+    s_weblog[s_weblog_head][WEBLOG_LEN - 1] = '\0';
+    s_weblog_head = (s_weblog_head + 1) % WEBLOG_LINES;
+    if (s_weblog_count < WEBLOG_LINES) s_weblog_count++;
+    xSemaphoreGive(s_weblog_lock);
+}
+
+/* 拦截所有 ESP_LOGx：先存环形缓存，再交给原 vprintf 输出串口 */
+static int weblog_vprintf(const char *fmt, va_list args)
+{
+    char tmp[WEBLOG_LEN + 32];
+    va_list cp;
+    va_copy(cp, args);
+    vsnprintf(tmp, sizeof(tmp), fmt, cp);
+    va_end(cp);
+    /* 去掉末尾换行，WEB 显示更整齐 */
+    size_t n = strlen(tmp);
+    while (n > 0 && (tmp[n - 1] == '\n' || tmp[n - 1] == '\r')) tmp[--n] = '\0';
+    weblog_push(tmp);
+    if (s_orig_vprintf) return s_orig_vprintf(fmt, args);
+    return vprintf(fmt, args);
+}
+
+/* 供 webserver 的 /api/logs 调用：把缓存拼成 JSON 数组 */
+esp_err_t wifi_manager_get_weblog(char *out, size_t out_len, uint16_t max_lines)
+{
+    if (!out || out_len == 0) return ESP_ERR_INVALID_ARG;
+    if (s_weblog_lock == NULL) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_weblog_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    uint16_t n = s_weblog_count < max_lines ? s_weblog_count : max_lines;
+    uint16_t start = (s_weblog_head + WEBLOG_LINES - n) % WEBLOG_LINES;
+    size_t off = 0;
+    off += snprintf(out + off, out_len - off, "[");
+    for (uint16_t i = 0; i < n && off + 8 < out_len; i++) {
+        uint16_t idx = (start + i) % WEBLOG_LINES;
+        /* 简单转义双引号和反斜杠 */
+        char esc[WEBLOG_LEN * 2];
+        size_t e = 0;
+        for (const char *p = s_weblog[idx]; *p && e + 2 < sizeof(esc); p++) {
+            if (*p == '"' || *p == '\\') esc[e++] = '\\';
+            esc[e++] = *p;
+        }
+        esc[e] = '\0';
+        off += snprintf(out + off, out_len - off, "%s\"%s\"",
+                        i ? "," : "", esc);
+        if (off >= out_len - 4) break;
+    }
+    snprintf(out + off, out_len - off, "]");
+    xSemaphoreGive(s_weblog_lock);
+    return ESP_OK;
+}
 
 /* ==================== 内部状态 ==================== */
 static bool             s_ready       = false;
@@ -31,6 +102,7 @@ static wifi_manager_mode_t s_mode     = WIFI_MGR_MODE_AUTO;
 
 static uint8_t          s_retry_count = 0;
 static bool             s_ap_started  = false;
+static int64_t          s_connect_start_us = 0;  /* 本次连接计时起点（sta_connect 调用时） */
 
 /* 回调 */
 static wifi_manager_event_cb_t s_event_cb    = NULL;
@@ -57,15 +129,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     switch (id) {
     case WIFI_EVENT_STA_START:
         emit_event(WIFI_MGR_EV_CONNECTING);
+        ESP_LOGI(TAG, "[1/4] STA 已启动，开始扫描/认证…");
         break;
 
     case WIFI_EVENT_STA_CONNECTED:
         emit_event(WIFI_MGR_EV_CONNECTED);
-        ESP_LOGI(TAG, "已关联热点，等待获取 IP …");
+        {
+            long elapsed_ms = s_connect_start_us ?
+                (long)((esp_timer_get_time() - s_connect_start_us) / 1000) : -1;
+            ESP_LOGI(TAG, "[2/4] 已关联热点，等待获取 IP …（+%ld ms）", elapsed_ms);
+        }
         break;
 
-    case WIFI_EVENT_STA_DISCONNECTED:
+    case WIFI_EVENT_STA_DISCONNECTED: {
         emit_event(WIFI_MGR_EV_DISCONNECTED);
+        int reason = -1;
+        if (data) {
+            reason = ((wifi_event_sta_disconnected_t *)data)->reason;
+        }
+        ESP_LOGW(TAG, "STA 断开，reason=%d", reason);
         if (s_mode == WIFI_MGR_MODE_AUTO && !s_ap_started) {
             s_retry_count++;
             ESP_LOGW(TAG, "断开，重试 %u/%u",
@@ -80,9 +162,21 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                 esp_wifi_connect();
             }
         } else if (s_cfg.auto_reconnect) {
-            esp_wifi_connect();
+            /* APSTA 配网期间也重试，但加次数上限，避免密码错误时无限空转。
+             * 事件任务里不能 vTaskDelay（会阻塞整个事件循环），直接重连。 */
+            s_retry_count++;
+            if (s_cfg.max_retry != 0 && s_retry_count > s_cfg.max_retry) {
+                ESP_LOGE(TAG, "STA 连接失败已达 %u 次，请检查 SSID/密码后重试",
+                         s_retry_count - 1);
+                return;
+            }
+            esp_err_t rc = esp_wifi_connect();
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "重连调用失败: %s", esp_err_to_name(rc));
+            }
         }
         break;
+    }
 
     case WIFI_EVENT_AP_START:
         s_ap_started = true;
@@ -97,16 +191,39 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 static void ip_event_handler(void *arg, esp_event_base_t base,
                              int32_t id, void *data)
 {
-    (void)arg; (void)data;
+    (void)arg;
     if (base != IP_EVENT || id != IP_EVENT_STA_GOT_IP) return;
 
     s_retry_count = 0;
     emit_event(WIFI_MGR_EV_GOT_IP);
 
-    /* 拿到 IP 后：不恢复 AP（AP 会占用信道，干扰 STA），只启动 Webserver */
-    if (!s_ap_started) {
-        wifi_webserver_start_internal();
-        ESP_LOGI(TAG, "已连上路由器，Webserver 启动在 STA IP");
+    /* 打印 IP + 本次连接总耗时 */
+    {
+        ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
+        long elapsed_ms = s_connect_start_us ?
+            (long)((esp_timer_get_time() - s_connect_start_us) / 1000) : -1;
+        ESP_LOGI(TAG, "[3/4] 已获取 IP：" IPSTR "（本次连接耗时 %ld ms）",
+                 IP2STR(&evt->ip_info.ip), elapsed_ms);
+        s_connect_start_us = 0;
+    }
+
+    /* [4/4] 关 AP：连上后 AP 留着只会占信道、干扰 STA，且配网已完成。
+     * 注意：只切 mode，不调 stop/start——stop 会把刚连上的 STA 也掐断。 */
+    if (s_ap_started) {
+        ESP_LOGI(TAG, "[4/4] STA 已连上，开始关闭 AP…");
+        captive_portal_stop();
+        ESP_LOGI(TAG, "[4/4] Captive Portal/DNS 已停止");
+        esp_err_t wrc = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (wrc != ESP_OK) {
+            ESP_LOGW(TAG, "[4/4] 关闭 AP 失败: %s", esp_err_to_name(wrc));
+        } else {
+            ESP_LOGI(TAG, "[4/4] AP 已关闭，当前纯 STA 模式");
+        }
+        s_ap_started = false;
+        /* Webserver 监听 0.0.0.0，mode 切换不影响，已绑定的 server 不用重起 */
+        ESP_LOGI(TAG, "[4/4] Webserver 保留，STA IP 上可继续访问 /success、/api/logs");
+    } else {
+        ESP_LOGI(TAG, "已连上路由器（AP 本来就没开）");
     }
 
     /* NTP：连上后启动时间同步 */
@@ -136,14 +253,10 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
     }
     ESP_ERROR_CHECK(err);
 
-    /* 开发模式：每次启动清除已保存的 WiFi 配置，强制重新配网；
-       生产模式：保留历史配置，设备自动连接上次保存的 AP */
-#ifdef CONFIG_WIFI_MGR_DEV_MODE
-    ESP_LOGI(TAG, "开发模式：清除 NVS WiFi 配置");
-    wifi_manager_clear_config();
-#else
-    ESP_LOGI(TAG, "生产模式：保留 NVS WiFi 配置");
-#endif
+    /* WiFi 配置：刷固件、重启都不清除，始终保留并自动连接上次保存的 AP。
+     * 开发期调试如需强制进配网，请手动调用 wifi_manager_clear_config() 后重启，
+     * 或调用 wifi_manager_start_config_portal()。 */
+    ESP_LOGI(TAG, "保留 NVS WiFi 配置");
 
     /* 网络栈 */
     ESP_ERROR_CHECK(esp_netif_init());
@@ -165,7 +278,15 @@ esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
                                                ip_event_handler, NULL));
 
     s_ready = true;
-    ESP_LOGI(TAG, "WiFi 管理器初始化完成，mode=%d", (int)s_mode);
+
+    /* 安装日志拦截：此后所有 ESP_LOGx 同时进环形缓存，供 WEB /api/logs 查看 */
+    if (s_weblog_lock == NULL) {
+        s_weblog_lock = xSemaphoreCreateMutex();
+    }
+    if (s_orig_vprintf == NULL) {
+        s_orig_vprintf = esp_log_set_vprintf(weblog_vprintf);
+    }
+    ESP_LOGI(TAG, "WiFi 管理器初始化完成，mode=%d（WEB 日志缓存已启用）", (int)s_mode);
 
     /* 按模式启动 */
     switch (s_mode) {
@@ -258,36 +379,46 @@ esp_err_t wifi_manager_sta_connect(void)
 {
     if (!s_ready) return ESP_ERR_INVALID_STATE;
     s_retry_count = 0;
-    /* 关键：连接前完全停 AP，避免双无线电信道冲突导致 STA 反复断连 */
-    bool ap_was_started = s_ap_started;
-    if (ap_was_started) {
-        wifi_webserver_stop_internal();
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_stop();
-        s_ap_started = false;
-        ESP_LOGI(TAG, "连接前：已暂停 AP，纯 STA 模式");
-    }
+    s_connect_start_us = esp_timer_get_time();  /* [0/4] 连接计时起点 */
+    ESP_LOGI(TAG, "[0/4] 发起 STA 连接…");
+    /* 保持 AP 运行：APSTA 下 STA 可直接连接，停 AP 会让手机掉线、
+     * 配网页不可访问，且 stop 后未 start 会导致 connect 直接失败。 */
 
     /* 加载保存的密码 */
     char ssid[33] = {0}, pw[65] = {0};
     if (wifi_manager_load_config(ssid, pw, sizeof(ssid), sizeof(pw)) != ESP_OK
         || ssid[0] == '\0') {
         ESP_LOGW(TAG, "无保存配置，无法连接 STA");
-        if (ap_was_started) {
-            esp_wifi_set_mode(WIFI_MODE_APSTA);
-            esp_wifi_start();
-            s_ap_started = true;
-            wifi_webserver_start_internal();
-        }
         return ESP_ERR_NOT_FOUND;
     }
 
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, pw, sizeof(wc.sta.password) - 1);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
-    ESP_ERROR_CHECK(esp_wifi_connect());
-    ESP_LOGI(TAG, "开始连接 STA: %s", ssid);
+    /* 确保 APSTA 运行（扫描/配网后可能只剩 AP），再下发 STA 配置并连接 */
+    esp_err_t mrc = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (mrc != ESP_OK && mrc != ESP_ERR_WIFI_STATE) {
+        ESP_LOGW(TAG, "set_mode APSTA 失败: %s", esp_err_to_name(mrc));
+    }
+    esp_err_t src = esp_wifi_start();
+    if (src != ESP_OK && src != ESP_ERR_WIFI_STATE) {
+        ESP_LOGW(TAG, "wifi_start 失败: %s", esp_err_to_name(src));
+    }
+    s_ap_started = true;
+    ESP_LOGI(TAG, "开始连接 STA: %s (密码长度 %d)", ssid, (int)strlen(pw));
+    ESP_LOGI(TAG, "下发 STA 配置…");
+    esp_wifi_disconnect();
+    esp_err_t crc = esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (crc != ESP_OK) {
+        ESP_LOGE(TAG, "STA 配置下发失败: %s", esp_err_to_name(crc));
+        return crc;
+    }
+    crc = esp_wifi_connect();
+    if (crc != ESP_OK) {
+        ESP_LOGE(TAG, "STA 连接发起失败: %s", esp_err_to_name(crc));
+        return crc;
+    }
+    ESP_LOGI(TAG, "STA 连接已发起，等待关联…");
     return ESP_OK;
 }
 
@@ -327,8 +458,8 @@ esp_err_t wifi_manager_start_config_portal(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* 清旧配置，强制下次走配网页 */
-    wifi_manager_clear_config();
+    /* 注意：不要在这里清 NVS！保存的密码是 STA 连接的唯一凭证，
+     * 清掉会导致连接失败后无法重试、重启后也无法自动连接。 */
     s_ap_started = true;
 
     wifi_webserver_start_internal();
@@ -366,43 +497,30 @@ esp_err_t wifi_manager_scan_all(wifi_ap_record_t *buf, uint16_t max_count, uint1
 
     esp_wifi_scan_stop();
 
-    /* 扫描期间临时关闭 AP，避免信道跳变导致 STA 反复断连 */
-    bool was_ap_started = s_ap_started;
-    if (s_ap_started) {
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_stop();
-        s_ap_started = false;
-        ESP_LOGI(TAG, "扫描：已暂停 AP");
-    }
-
+    /* 注意：扫描时保持 AP 运行。APSTA 模式支持后台扫描，
+     * 停 AP 会掐断配网手机的 HTTP 连接，导致前端报"请求失败"。 */
     wifi_scan_config_t cfg = {
         .ssid       = NULL,
         .bssid      = NULL,
         .channel    = 0,
         .show_hidden = false,
         .scan_type  = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time  = { .active.min = 100, .active.max = 300 },
+        .scan_time  = { .active.min = 60, .active.max = 180 },
     };
 
+    int64_t scan_start = esp_timer_get_time();
+    ESP_LOGI(TAG, "开始扫描可用 AP…");
     esp_err_t err = esp_wifi_scan_start(&cfg, true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "扫描启动失败: %s", esp_err_to_name(err));
-        goto restore;
+        return err;
     }
 
     uint16_t n = max_count < 20 ? max_count : 20;
     err = esp_wifi_scan_get_ap_records(&n, buf);
     *out_count = (err == ESP_OK) ? n : 0;
-    ESP_LOGI(TAG, "扫描完成，发现 %u 个 AP", *out_count);
-
-restore:
-    /* 恢复 AP */
-    if (!s_ap_started && was_ap_started) {
-        esp_wifi_set_mode(WIFI_MODE_APSTA);
-        esp_wifi_start();
-        s_ap_started = true;
-        ESP_LOGI(TAG, "扫描：已恢复 AP");
-    }
+    ESP_LOGI(TAG, "扫描完成，发现 %u 个 AP（耗时 %ld ms）", *out_count,
+             (long)((esp_timer_get_time() - scan_start) / 1000));
     return err;
 }
 

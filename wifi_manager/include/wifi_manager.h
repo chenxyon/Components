@@ -127,6 +127,16 @@ esp_err_t wifi_manager_get_status(wifi_status_t *status);
 bool      wifi_manager_is_connected(void);
 wifi_signal_level_t wifi_manager_rssi_to_level(int8_t rssi);
 
+/**
+ * @brief  取出环形日志缓存，拼成 JSON 数组字符串
+ *
+ * @param out       输出缓冲（调用方分配）
+ * @param out_len   缓冲长度
+ * @param max_lines 最多取多少行
+ * @return ESP_OK 成功；ESP_ERR_INVALID_STATE 日志系统未初始化
+ */
+esp_err_t wifi_manager_get_weblog(char *out, size_t out_len, uint16_t max_lines);
+
 /* ==================== STA 连接管理 ==================== */
 
 /**
