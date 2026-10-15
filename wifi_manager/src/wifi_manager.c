@@ -226,6 +226,16 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "已连上路由器（AP 本来就没开）");
     }
 
+    /* STA IP 上也要能打开 /success、/api/logs、/api/status。
+     * 注意：直连旧 AP 上电时根本没进过配网，Web 服务从未启动，
+     * 这里补起一次；只起 HTTP，不绑 DNS/Captive（STA 下不需要劫持）。 */
+    if (wifi_webserver_handle() == NULL) {
+        ESP_LOGI(TAG, "[4/4] STA 模式补起 Web 服务（仅 HTTP）…");
+        if (wifi_webserver_start_http_only() != ESP_OK) {
+            ESP_LOGW(TAG, "[4/4] Web 服务补起失败，STA IP 上查不了 /success");
+        }
+    }
+
     /* NTP：连上后启动时间同步 */
     if (s_cfg.enable_ntp && s_cfg.ntp_server != NULL) {
         sntp_setservername(0, (char *)s_cfg.ntp_server);

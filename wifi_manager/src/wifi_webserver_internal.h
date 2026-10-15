@@ -31,6 +31,11 @@ httpd_handle_t wifi_webserver_handle(void);
 esp_err_t wifi_webserver_start_internal(void);
 
 /**
+ * @brief  仅启动 HTTP（STA 模式补起 /success、/api/logs 用，不绑 DNS）
+ */
+esp_err_t wifi_webserver_start_http_only(void);
+
+/**
  * @brief  停止配网 Web 服务器（供 wifi_manager.c 调用）
  */
 esp_err_t wifi_webserver_stop_internal(void);

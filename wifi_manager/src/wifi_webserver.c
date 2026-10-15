@@ -230,6 +230,8 @@ static const char *SUCCESS_PAGE =
 "<div class=\"ssid\" id=\"ssid\">-</div>"
 "<div class=\"ip\" id=\"ip\">-</div>"
 "<div style=\"margin-top:14px;text-align:left\">"
+"<button onclick=\"reopenPortal()\" style=\"width:100%;padding:10px;border:none;border-radius:8px;background:#007bff;color:#fff;font-size:15px\">打开 AP 配网（重配 WiFi）</button>"
+"<div id=\"portalMsg\" style=\"font-size:13px;color:#555;margin:6px 0;display:none\"></div>"
 "<button onclick=\"loadLogs()\" style=\"width:100%;padding:10px;border:none;border-radius:8px;background:#6c757d;color:#fff;font-size:15px\">查看设备日志</button>"
 "<pre id=\"logs\" style=\"display:none;max-height:300px;overflow-y:auto;background:#1e1e1e;color:#d4d4d4;"
 "font-size:11px;padding:10px;border-radius:6px;white-space:pre-wrap;word-break:break-all\"></pre>"
@@ -244,6 +246,13 @@ static const char *SUCCESS_PAGE =
 "fetch('/api/logs?n=120',{cache:'no-store'}).then(function(r){return r.json();})"
 ".then(function(a){el.textContent=a.join('\\n')||'(空)';el.scrollTop=el.scrollHeight;})"
 ".catch(function(e){el.textContent='加载失败:'+e;});}"
+"function reopenPortal(){var m=document.getElementById('portalMsg');"
+"m.style.display='block';m.textContent='正在打开 AP 配网…';"
+"fetch('/api/portal',{method:'POST'}).then(function(r){return r.json();})"
+".then(function(d){"
+"if(d.success){m.textContent='配网热点已打开：'+d.ssid+'，请连热点后访问 http://192.168.4.1/';}"
+"else{m.textContent='打开失败：'+(d.error||'未知错误');}})"
+".catch(function(e){m.textContent='请求失败:'+e;});}"
 "</script></body></html>";
 
 
@@ -387,8 +396,33 @@ static esp_err_t success_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* 前向声明 */
-static esp_err_t wifi_webserver_start(void);
+/* POST /api/portal：STA 已连时重开 AP 配网。
+ * 注意：不能在 httpd 任务里直接起配网（含 wifi 模式切换 + 停 server），
+ * 先回包，再开任务延迟 300ms 执行。复用现成 wifi_connect_wrapper 风格。 */
+static void portal_reopen_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300));
+    ESP_LOGI(TAG, "收到 /api/portal，重开 AP 配网…");
+    wifi_manager_start_config_portal();
+    vTaskDelete(NULL);
+}
+
+static esp_err_t portal_handler(httpd_req_t *req)
+{
+    set_json_response_headers(req);
+    /* 先回包，浏览器拿到 ssid/网关提示后再切模式，避免连接被掐 */
+    const char *ssid = "XIAOLE_WIFI";
+    char buf[96];
+    snprintf(buf, sizeof(buf),
+             "{\"success\":true,\"ssid\":\"%s\",\"url\":\"http://192.168.4.1/\"}", ssid);
+    httpd_resp_sendstr(req, buf);
+    xTaskCreate(portal_reopen_task, "portal_reopen", 4096, NULL, 5, NULL);
+    return ESP_OK;
+}
+
+esp_err_t wifi_webserver_start_no_portal(void);
+
 static esp_err_t wifi_webserver_stop(void);
 
 /* ==================== 内部包装（供 wifi_manager.c 使用） ==================== */
@@ -396,6 +430,11 @@ static esp_err_t wifi_webserver_stop(void);
 esp_err_t wifi_webserver_start_internal(void)
 {
     return wifi_webserver_start();
+}
+
+esp_err_t wifi_webserver_start_http_only(void)
+{
+    return wifi_webserver_start_no_portal();
 }
 
 esp_err_t wifi_webserver_stop_internal(void)
@@ -687,6 +726,30 @@ static const httpd_uri_t logs_uri = {
 
 };
 
+static const httpd_uri_t portal_uri = {
+
+    .uri = "/api/portal",
+
+    .method = HTTP_POST,
+
+    .handler = portal_handler,
+
+    .user_ctx = NULL
+
+};
+
+static const httpd_uri_t options_portal_uri = {
+
+    .uri = "/api/portal",
+
+    .method = HTTP_OPTIONS,
+
+    .handler = options_handler,
+
+    .user_ctx = NULL
+
+};
+
 
 
 static esp_err_t options_handler(httpd_req_t *req) {
@@ -788,9 +851,13 @@ esp_err_t wifi_webserver_start(void) {
 
     httpd_register_uri_handler(s_server, &logs_uri);
 
+    httpd_register_uri_handler(s_server, &portal_uri);
+
     httpd_register_uri_handler(s_server, &options_config_uri);
 
     httpd_register_uri_handler(s_server, &options_scan_uri);
+
+    httpd_register_uri_handler(s_server, &options_portal_uri);
 
 
 
@@ -814,6 +881,43 @@ esp_err_t wifi_webserver_start(void) {
 
     return ESP_OK;
 
+}
+
+/**
+
+ * @brief 仅启动 HTTP（STA 模式补起 /success、/api/logs 用，不绑 DNS 劫持）
+
+ */
+
+esp_err_t wifi_webserver_start_no_portal(void)
+{
+    if (s_server != NULL) {
+        return ESP_OK;
+    }
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.ctrl_port = 32768;
+    config.max_uri_handlers = 16;
+    config.stack_size = 8192;
+
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP-only 启动失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    httpd_register_uri_handler(s_server, &root_uri);
+    httpd_register_uri_handler(s_server, &config_uri);
+    httpd_register_uri_handler(s_server, &scan_uri);
+    httpd_register_uri_handler(s_server, &status_uri);
+    httpd_register_uri_handler(s_server, &success_uri);
+    httpd_register_uri_handler(s_server, &logs_uri);
+    httpd_register_uri_handler(s_server, &options_config_uri);
+    httpd_register_uri_handler(s_server, &options_scan_uri);
+
+    ESP_LOGI(TAG, "Web server (HTTP-only) started on port 80");
+    return ESP_OK;
 }
 
 
