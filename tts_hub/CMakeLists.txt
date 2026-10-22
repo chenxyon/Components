@@ -1,9 +1,13 @@
 idf_component_register(
     SRCS
         "src/tts_hub.c"
+        "src/tts_phrases.c"
         "src/tts_xfyun.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
+        esp_websocket_client
         mbedtls
+        cjson
+        xfyun_auth
 )

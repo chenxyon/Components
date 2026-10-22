@@ -88,6 +88,9 @@ typedef struct {
     const char       *fallback_ssid;    /* 配网热点 SSID（默认 "XIAOLE_WIFI"）*/
     const char       *fallback_pw;      /* 配网热点密码（默认 "12345678"）*/
     uint8_t           fallback_channel; /* 配网热点信道（默认 6）*/
+    uint32_t          portal_keep_ap_ms;/* 配网会话中 STA 连上后，AP 保持多久再关
+                                          （默认 20000ms；0=立即关，需自行处理
+                                            配网页轮询结果）*/
 
     /* 回调 */
     wifi_manager_event_cb_t event_cb;   /* 可选，可为 NULL */
@@ -95,6 +98,22 @@ typedef struct {
 } wifi_manager_config_t;
 
 /* ==================== 核心 API ==================== */
+
+/**
+ * @brief  取得一份通用默认配置
+ *
+ * 功能：填好所有与项目无关的通用项（重试、自动重连、NTP、配网会话行为）。
+ *       项目只覆盖产品相关字段：
+ *         cfg = wifi_manager_default_config();
+ *         cfg.fallback_ssid = "你的热点名";
+ *         cfg.fallback_pw   = "你的密码";
+ *         cfg.event_cb      = 你的回调;
+ *         wifi_manager_init(&cfg);
+ *
+ * @note   fallback_ssid / fallback_pw 默认 NULL，组件不预设产品标识；
+ *        fallback_channel 默认 0（AP 信道跟随 STA）。
+ */
+wifi_manager_config_t wifi_manager_default_config(void);
 
 /**
  * @brief  初始化 WiFi 管理器
@@ -162,6 +181,11 @@ esp_err_t wifi_manager_start_config_portal(void);
  * @brief  停止配网（回到 STA 模式）
  */
 esp_err_t wifi_manager_stop_config_portal(void);
+
+/**
+ * @brief  取配网热点 SSID（供 /api/portal 回包用真实名）
+ */
+const char *wifi_manager_portal_ssid(void);
 
 /**
  * @brief  获取当前配置模式

@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "src/kws_hub.c"
+        "src/kws_xfyun.c"
+        "src/kws_esp_sr.c"
+    INCLUDE_DIRS
+        "include"
+    PRIV_INCLUDE_DIRS
+        "src"
+    REQUIRES
+        inmp441
+        xfyun_auth
+        tts_hub
+    PRIV_REQUIRES
+        mbedtls
+        esp_websocket_client
+        cjson
+)

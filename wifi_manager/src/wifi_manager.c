@@ -102,7 +102,67 @@ static wifi_manager_mode_t s_mode     = WIFI_MGR_MODE_AUTO;
 
 static uint8_t          s_retry_count = 0;
 static bool             s_ap_started  = false;
+static bool             s_in_portal   = false;  /* 用户手动重开的配网会话：保持 AP 不关、不自动重连 STA */
 static int64_t          s_connect_start_us = 0;  /* 本次连接计时起点（sta_connect 调用时） */
+/* 配网会话中 STA 连上后，延时关闭 AP（配网页需要时间轮询结果） */
+static bool             s_ap_close_pending = false;
+static esp_timer_handle_t s_ap_close_timer = NULL;
+
+/* ==================== AP 关闭 ==================== */
+
+/**
+ * @brief  关闭 AP，回到纯 STA 模式
+ *
+ * 只切 mode，不调 stop/start —— stop 会把刚连上的 STA 也掐断。
+ */
+static void ap_shutdown(void)
+{
+    captive_portal_stop();
+    ESP_LOGI(TAG, "关闭 AP：Captive Portal/DNS 已停止");
+    esp_err_t wrc = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (wrc != ESP_OK) {
+        ESP_LOGW(TAG, "关闭 AP 失败: %s", esp_err_to_name(wrc));
+    } else {
+        ESP_LOGI(TAG, "AP 已关闭，当前纯 STA 模式");
+    }
+    s_ap_started         = false;
+    s_ap_close_pending   = false;
+    /* Webserver 监听 0.0.0.0，mode 切换不影响，已绑定的 server 不用重起 */
+    ESP_LOGI(TAG, "Webserver 保留，STA IP 上可继续访问 /success、/api/logs");
+}
+
+/* 配网会话结束后的延时关 AP 回调 */
+static void ap_close_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "配网会话延时到期，自动关闭 AP");
+    ap_shutdown();
+}
+
+/**
+ * @brief  安排延时关闭 AP
+ * @param  delay_ms  延迟毫秒
+ */
+static void ap_shutdown_later(uint32_t delay_ms)
+{
+    if (s_ap_close_timer == NULL) {
+        const esp_timer_create_args_t targs = {
+            .callback = ap_close_timer_cb,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+        };
+        esp_err_t terr = esp_timer_create(&targs, &s_ap_close_timer);
+        if (terr != ESP_OK) {
+            ESP_LOGW(TAG, "创建 AP 关闭定时器失败: %s", esp_err_to_name(terr));
+            s_ap_close_timer = NULL;
+            ap_shutdown();          /* 退而求其次：立即关 */
+            return;
+        }
+    }
+    esp_timer_stop(s_ap_close_timer);
+    esp_timer_start_once(s_ap_close_timer, (uint64_t)delay_ms * 1000ULL);
+    s_ap_close_pending = true;
+}
 
 /* 回调 */
 static wifi_manager_event_cb_t s_event_cb    = NULL;
@@ -148,6 +208,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             reason = ((wifi_event_sta_disconnected_t *)data)->reason;
         }
         ESP_LOGW(TAG, "STA 断开，reason=%d", reason);
+        /* 配网会话中（/api/portal 手动重开）：不断线重连、不进重试逻辑，
+         * 否则 STA 切信道会把刚开的 AP 热点带跑、手机搜不到。 */
+        if (s_in_portal) {
+            ESP_LOGI(TAG, "配网会话中，STA 保持断开，AP 信道不受干扰");
+            break;
+        }
         if (s_mode == WIFI_MGR_MODE_AUTO && !s_ap_started) {
             s_retry_count++;
             ESP_LOGW(TAG, "断开，重试 %u/%u",
@@ -208,20 +274,24 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     }
 
     /* [4/4] 关 AP：连上后 AP 留着只会占信道、干扰 STA，且配网已完成。
-     * 注意：只切 mode，不调 stop/start——stop 会把刚连上的 STA 也掐断。 */
-    if (s_ap_started) {
+     * 注意：只切 mode，不调 stop/start——stop 会把刚连上的 STA 也掐断。
+     * 配网会话中（用户刚在 /success 点了重开配网）不要关 AP，
+     * 否则热点闪一下就没了，手机根本搜不到。 */
+    if (s_ap_started && !s_in_portal) {
         ESP_LOGI(TAG, "[4/4] STA 已连上，开始关闭 AP…");
-        captive_portal_stop();
-        ESP_LOGI(TAG, "[4/4] Captive Portal/DNS 已停止");
-        esp_err_t wrc = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (wrc != ESP_OK) {
-            ESP_LOGW(TAG, "[4/4] 关闭 AP 失败: %s", esp_err_to_name(wrc));
+        ap_shutdown();
+    } else if (s_in_portal) {
+        /* 配网会话中用户刚在配网页点了保存并连接：STA 连上了，AP 暂时保持，
+         * 让用户手机上那个还开着配网页的标签页能轮询到结果；
+         * 但不能永久保留 —— 延时一段时间后自动关闭，回到纯 STA 模式。 */
+        uint32_t keep = s_cfg.portal_keep_ap_ms;
+        ESP_LOGI(TAG, "[4/4] 配网会话中 STA 已连上，AP 保持 %u ms 后自动关闭",
+                 (unsigned)keep);
+        if (keep == 0) {
+            ap_shutdown();
         } else {
-            ESP_LOGI(TAG, "[4/4] AP 已关闭，当前纯 STA 模式");
+            ap_shutdown_later(keep);
         }
-        s_ap_started = false;
-        /* Webserver 监听 0.0.0.0，mode 切换不影响，已绑定的 server 不用重起 */
-        ESP_LOGI(TAG, "[4/4] Webserver 保留，STA IP 上可继续访问 /success、/api/logs");
     } else {
         ESP_LOGI(TAG, "已连上路由器（AP 本来就没开）");
     }
@@ -244,6 +314,46 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
 }
 
 /* ==================== 公共 API ==================== */
+
+/**
+ * @brief  取得一份通用默认配置
+ *
+ * 功能：填好所有「与项目无关」的通用项（重试次数/间隔、自动重连、NTP、
+ *       配网会话行为），项目只需覆盖产品相关字段，避免每个项目抄一遍
+ *       同样的默认值。
+ *
+ * @note   fallback_ssid / fallback_pw 故意留 NULL：配网热点名是产品标识，
+ *        组件不预设，必须由项目填写（否则用组件中性默认名 WiFi-Setup）。
+ * @note   fallback_channel=0 表示 AP 信道跟随 STA，避免共存时热点消失。
+ */
+wifi_manager_config_t wifi_manager_default_config(void)
+{
+    wifi_manager_config_t c = {
+        .mode              = WIFI_MGR_MODE_AUTO,
+        .max_retry         = 5,
+        .retry_interval_ms = 3000,
+        .auto_reconnect    = true,
+        .enable_ntp        = true,
+        .ntp_server        = "cn.pool.ntp.org",
+        .fallback_ssid     = NULL,
+        .fallback_pw       = NULL,
+        .fallback_channel  = 0,      /* 0 = 跟随 STA */
+        .portal_keep_ap_ms = 20000, /* 配网会话结束后 AP 保持 20s 再关 */
+        .event_cb          = NULL,
+        .event_cb_ctx      = NULL,
+    };
+    return c;
+}
+
+/* 配网热点名：项目没给就用组件中性默认名（不硬编码任何产品标识） */
+static const char *portal_ssid(void)
+{
+    if (s_cfg.fallback_ssid && s_cfg.fallback_ssid[0]) {
+        return s_cfg.fallback_ssid;
+    }
+    ESP_LOGW(TAG, "fallback_ssid 未设置，配网热点使用组件默认名 WiFi-Setup");
+    return "WiFi-Setup";
+}
 
 esp_err_t wifi_manager_init(const wifi_manager_config_t *config)
 {
@@ -452,31 +562,49 @@ esp_err_t wifi_manager_start_config_portal(void)
     wifi_webserver_stop_internal();
     esp_wifi_disconnect();
 
-    /* 设回 APSTA 让扫描可用 */
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_start();
+    /* 设回 APSTA 让扫描可用（已在运行会返回 ESP_ERR_WIFI_STATE，属正常） */
+    esp_err_t mrc = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (mrc != ESP_OK && mrc != ESP_ERR_WIFI_STATE) {
+        ESP_LOGE(TAG, "配网 set_mode APSTA 失败: %s", esp_err_to_name(mrc));
+        return mrc;
+    }
+    esp_err_t src = esp_wifi_start();
+    if (src != ESP_OK && src != ESP_ERR_WIFI_STATE) {
+        ESP_LOGE(TAG, "配网 wifi_start 失败: %s", esp_err_to_name(src));
+        return src;
+    }
 
-    /* 配置 SoftAP */
-    const char *ssid  = s_cfg.fallback_ssid  ? s_cfg.fallback_ssid  : "XIAOLE_WIFI";
-    const char *pw    = s_cfg.fallback_pw    ? s_cfg.fallback_pw    : "12345678";
-    uint8_t     ch    = s_cfg.fallback_channel ? s_cfg.fallback_channel : 6;
+    /* 配网热点信道锁定 1：AP+STA 共存时 AP 信道必须与 STA 一致，
+     * 让驱动按已连 STA 的信道自动收敛；写死 6 只会导致 STA 一连就跳信道、
+     * 手机侧刚搜到的热点立刻消失。1 仅当 STA 尚未连接时作为初始值。 */
+    const char *ssid  = portal_ssid();
+    const char *pw    = s_cfg.fallback_pw ? s_cfg.fallback_pw : "";
 
     wifi_config_t ap_cfg = {0};
     strncpy((char *)ap_cfg.ap.ssid, ssid, sizeof(ap_cfg.ap.ssid) - 1);
     strncpy((char *)ap_cfg.ap.password, pw, sizeof(ap_cfg.ap.password) - 1);
-    ap_cfg.ap.channel      = ch;
+    /* channel=0：STA 未连时驱动默认用 1；STA 已连/将连时自动跟随 STA 信道，
+     * 热点不会再因信道跳变消失 */
+    ap_cfg.ap.channel      = 0;
     ap_cfg.ap.ssid_hidden  = false;
     ap_cfg.ap.max_connection = 4;
     ap_cfg.ap.authmode     = strlen(pw) > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_err_t crc = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    if (crc != ESP_OK) {
+        ESP_LOGE(TAG, "配网 AP 配置下发失败: %s", esp_err_to_name(crc));
+        return crc;
+    }
 
     /* 注意：不要在这里清 NVS！保存的密码是 STA 连接的唯一凭证，
      * 清掉会导致连接失败后无法重试、重启后也无法自动连接。 */
     s_ap_started = true;
+    s_in_portal  = true;   /* 标记配网会话：断线不重连、GOT_IP 不关 AP */
 
-    wifi_webserver_start_internal();
-    ESP_LOGI(TAG, "配网模式已启动：SSLA=%s 通道=%d", ssid, ch);
+    esp_err_t wrc = wifi_webserver_start_internal();
+    if (wrc != ESP_OK) {
+        ESP_LOGW(TAG, "配网 Web 启动失败: %s", esp_err_to_name(wrc));
+    }
+    ESP_LOGI(TAG, "配网模式已启动：SSID=%s（信道跟随 STA，断线不重连）", ssid);
     return ESP_OK;
 }
 
@@ -485,10 +613,25 @@ esp_err_t wifi_manager_stop_config_portal(void)
     if (!s_ready) return ESP_ERR_INVALID_STATE;
     wifi_webserver_stop_internal();
     s_ap_started = false;
+    s_in_portal  = false;   /* 配网会话结束，恢复正常断线重连/GOT_IP 关 AP 逻辑 */
     /* 切回 APSTA 保持扫描能力 */
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_start();
+    esp_err_t mrc = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (mrc != ESP_OK && mrc != ESP_ERR_WIFI_STATE) {
+        return mrc;
+    }
+    esp_err_t src = esp_wifi_start();
+    if (src != ESP_OK && src != ESP_ERR_WIFI_STATE) {
+        return src;
+    }
     return ESP_OK;
+}
+
+/**
+ * @brief  取配网热点 SSID（供 /api/portal 回包用真实名）
+ */
+const char *wifi_manager_portal_ssid(void)
+{
+    return portal_ssid();
 }
 
 wifi_manager_mode_t wifi_manager_get_mode(void)

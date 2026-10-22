@@ -1,0 +1,59 @@
+menu "KWS Hub (wake word)"
+
+    choice KWS_ENGINE
+        prompt "Wake word engine"
+        default KWS_ENGINE_XFYUN_IAT
+        help
+            讯飞在线听写：唤醒词可任意自定义（改字符串即可），零模型零训练；
+            代价是依赖网络，唤醒延迟约 1~2 秒。
+            ESP-SR 离线：延迟 <100ms 且不耗流量，但引擎尚未实现，
+            且自定义唤醒词需云端训练。
+
+        config KWS_ENGINE_XFYUN_IAT
+            bool "XFyun online IAT (text match)"
+        config KWS_ENGINE_ESP_SR
+            bool "ESP-SR WakeNet (offline, not implemented yet)"
+    endchoice
+
+    config KWS_WAKE_WORD
+        string "Default wake word"
+        default "小智小智"
+        help
+            默认唤醒词，运行时可用 kws_hub_set_wake_word() 改。
+            匹配时忽略空格与标点，所以「小智， 小智」也能命中。
+
+    config KWS_IAT_SAMPLE_RATE
+        int "IAT sample rate"
+        range 8000 16000
+        default 16000
+
+    config KWS_IAT_EOS_MS
+        int "End-of-speech silence (ms)"
+        range 500 10000
+        default 2000
+        help
+            静音多久判定一句话结束。值越小唤醒越快，但容易把
+            说话中间的停顿当成结束。默认 2000。
+
+    config KWS_IAT_DOMAIN
+        string "IAT domain"
+        default "lm"
+        help
+            lm = 通用听写模型；slm = 语音听写大模型（需在控制台开通）。
+
+    config KWS_ASR_XFYUN_APPID
+        string "IAT APPID (empty = reuse TTS APPID)"
+        default ""
+        help
+            留空则复用语音合成的 APPID。讯飞的应用级密钥对该应用下
+            所有服务通用，通常无需单独填。
+
+    config KWS_ASR_XFYUN_API_KEY
+        string "IAT API Key (empty = reuse TTS API Key)"
+        default ""
+
+    config KWS_ASR_XFYUN_API_SECRET
+        string "IAT API Secret (empty = reuse TTS API Secret)"
+        default ""
+
+endmenu

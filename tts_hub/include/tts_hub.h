@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "tts_phrases.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,27 +21,40 @@ typedef enum {
 typedef void (*tts_pcm_cb_t)(const int16_t *pcm, size_t samples,
                              uint32_t sample_rate_hz, void *ctx);
 
-/* PCM 输出槽：板级把喇叭推送函数注册进来，tts_hub 只管合成，不管 I2S 细节。
- * 这样 tts_hub 无需依赖具体功放驱动（zhineng 的 max98357 在 main 里自带）。 */
-typedef esp_err_t (*tts_pcm_sink_cb_t)(const int16_t *pcm, size_t bytes, void *ctx);
+/* 播放沉槽：tts_hub 把已重采样好的 PCM 交给它（通常由 main 注册，接到 I2S 功放） */
+typedef void (*tts_pcm_sink_t)(const int16_t *pcm, size_t bytes);
 
 /* 驱动接口表 —— 每个厂商实现一套填进来 */
 typedef struct {
     const char *name;
     esp_err_t (*init)(void);
-    /* text: UTF-8；cb: 每解出一帧 PCM 回调一次；done: 全部结束（含失败） */
     esp_err_t (*speak)(const char *text, tts_pcm_cb_t cb, void *ctx);
     bool (*is_busy)(void);
 } tts_driver_t;
 
-esp_err_t tts_hub_init(void);
+/**
+ * @brief 初始化 TTS 中心
+ * @param sink          PCM 播放沉槽（必填，接功放）；可稍后 set 覆盖
+ * @param output_rate_hz 目标播放采样率（与功放一致，如 22050）
+ */
+esp_err_t tts_hub_init(tts_pcm_sink_t sink, uint32_t output_rate_hz);
 
-/* 注册 PCM 输出槽：板级把喇叭推送函数（如 max98357_play 封装）传进来 */
-esp_err_t tts_hub_set_sink(tts_pcm_sink_cb_t sink, void *ctx);
+/* 运行期调整沉槽 / 输出采样率 */
+void tts_hub_set_pcm_sink(tts_pcm_sink_t sink);
+void tts_hub_set_output_rate(uint32_t hz);
 
-/* 用 tts_config.h 里 TTS_ACTIVE_PROVIDER 指定的厂商播报 */
+/* ============ 任意文本（走云 TTS，需联网） ============ */
 esp_err_t tts_hub_speak(const char *text);
 esp_err_t tts_hub_speak_async(const char *text);
+
+/* ============ 固定话术（离线优先，缺失自动回退云） ============ */
+esp_err_t tts_hub_say(tts_phrase_t ph);
+esp_err_t tts_hub_say_async(tts_phrase_t ph);
+
+/* 是否在线（由上层在 GOT_IP / DISCONNECTED 时更新），影响固定话术兜底 */
+void tts_hub_set_online(bool online);
+bool tts_hub_online(void);
+
 bool      tts_hub_is_busy(void);
 const char *tts_hub_provider_name(void);
 

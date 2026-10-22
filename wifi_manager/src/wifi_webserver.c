@@ -164,14 +164,18 @@ document.getElementById('configForm').addEventListener('submit',function(e){
   var ssid=document.getElementById('ssid').value.trim();
   var pwd=document.getElementById('password').value;
   if(!ssid){ alert('请输入WiFi名称'); return; }
+  /* 提示：点保存后设备会断开当前热点去连新 WiFi，配网手机会掉线，
+   * 结果页轮询若失败属正常——等设备连上新 WiFi 的语音提示即可。 */
+  var s0=document.getElementById('status');
   fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,password:pwd})})
   .then(function(r){return r.json();})
   .then(function(d){
     var s=document.getElementById('status');
     if(d.success){
       s.className='status success';
-      s.textContent='配置已保存，正在连接…';
-      /* AP 保持运行，手机无需切换网络，原地轮询即可看到结果 */
+      s.textContent='配置已保存，设备正在连接 '+ssid+' …（手机即将与热点断开，属正常）';
+      /* AP 保持运行，手机无需切换网络，原地轮询即可看到结果。
+       * 轮询 404/断开属正常（设备切 STA 会关热点），以设备语音提示为准。 */
       var connTry=0,connIv=setInterval(function(){
         connTry++;
         fetch('/api/status',{cache:'no-store'}).then(function(r){return r.json();})
@@ -181,11 +185,19 @@ document.getElementById('configForm').addEventListener('submit',function(e){
             s.textContent='已成功连接 '+st.ssid+'（设备 IP：'+st.ip+'），配网完成';
           } else if(connTry>=30){
             clearInterval(connIv);
-            s.textContent='连接超时，请检查密码是否正确';
+            /* 30 次还没连上且页面已断开：大概率设备已切走、手机还挂在旧热点。
+             * 直接提示用户按语音/串口确认，不要误报密码错误。 */
+            s.textContent='设备可能已切换网络（本页面已断开），请听设备语音或看串口确认，不要重复提交';
             s.className='status error';
           }
         }).catch(function(){
-          if(connTry>=30){ clearInterval(connIv); }
+          /* 配网 AP 被关掉后请求会失败，这是预期行为：给设备一点时间，
+           * 30 次后仍失败才提示，避免“连接超时，请检查密码”误导。 */
+          if(connTry>=30){
+            clearInterval(connIv);
+            s.textContent='设备可能已切换网络（本页面已断开），请听设备语音或看串口确认，不要重复提交';
+            s.className='status error';
+          }
         });
       },2000);
     } else {
@@ -412,7 +424,7 @@ static esp_err_t portal_handler(httpd_req_t *req)
 {
     set_json_response_headers(req);
     /* 先回包，浏览器拿到 ssid/网关提示后再切模式，避免连接被掐 */
-    const char *ssid = "XIAOLE_WIFI";
+    const char *ssid = wifi_manager_portal_ssid();
     char buf[96];
     snprintf(buf, sizeof(buf),
              "{\"success\":true,\"ssid\":\"%s\",\"url\":\"http://192.168.4.1/\"}", ssid);
@@ -420,6 +432,8 @@ static esp_err_t portal_handler(httpd_req_t *req)
     xTaskCreate(portal_reopen_task, "portal_reopen", 4096, NULL, 5, NULL);
     return ESP_OK;
 }
+
+esp_err_t wifi_webserver_start(void);
 
 esp_err_t wifi_webserver_start_no_portal(void);
 
@@ -738,18 +752,6 @@ static const httpd_uri_t portal_uri = {
 
 };
 
-static const httpd_uri_t options_portal_uri = {
-
-    .uri = "/api/portal",
-
-    .method = HTTP_OPTIONS,
-
-    .handler = options_handler,
-
-    .user_ctx = NULL
-
-};
-
 
 
 static esp_err_t options_handler(httpd_req_t *req) {
@@ -790,6 +792,18 @@ static const httpd_uri_t options_scan_uri = {
 
 };
 
+static const httpd_uri_t options_portal_uri = {
+
+    .uri = "/api/portal",
+
+    .method = HTTP_OPTIONS,
+
+    .handler = options_handler,
+
+    .user_ctx = NULL
+
+};
+
 
 
 /**
@@ -820,7 +834,10 @@ esp_err_t wifi_webserver_start(void) {
 
     config.ctrl_port = 32768;
 
-    config.max_uri_handlers = 16;   /* 默认 8 个槽位不够（webserver 4 + captive_portal 9），扩到 16 */
+    /* webserver 自身 10 个（/ /config /api/scan /api/status /success /api/logs
+     * /api/portal + 3 个 OPTIONS），captive_portal 再注册 7 个探针路径，
+     * 合计 17 > 16 会报 "no slots left" 并导致 captive 探测失效，这里放宽。 */
+    config.max_uri_handlers = 24;
     config.stack_size = 8192;       /* scan_handler 结果缓冲较大，默认 4KB 栈会溢出 */
 
 
@@ -898,7 +915,7 @@ esp_err_t wifi_webserver_start_no_portal(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = 32768;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 24;   /* 同 wifi_webserver_start()：留足 captive_portal 探针槽位 */
     config.stack_size = 8192;
 
     esp_err_t err = httpd_start(&s_server, &config);
@@ -913,8 +930,10 @@ esp_err_t wifi_webserver_start_no_portal(void)
     httpd_register_uri_handler(s_server, &status_uri);
     httpd_register_uri_handler(s_server, &success_uri);
     httpd_register_uri_handler(s_server, &logs_uri);
+    httpd_register_uri_handler(s_server, &portal_uri);
     httpd_register_uri_handler(s_server, &options_config_uri);
     httpd_register_uri_handler(s_server, &options_scan_uri);
+    httpd_register_uri_handler(s_server, &options_portal_uri);
 
     ESP_LOGI(TAG, "Web server (HTTP-only) started on port 80");
     return ESP_OK;

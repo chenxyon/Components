@@ -1,0 +1,25 @@
+menu "TTS Hub"
+
+    config TTS_XFYUN_APPID
+        string "XFyun APPID"
+        default ""
+
+    config TTS_XFYUN_API_KEY
+        string "XFyun API Key"
+        default ""
+
+    config TTS_XFYUN_API_SECRET
+        string "XFyun API Secret"
+        default ""
+
+    config TTS_XFYUN_SPEED
+        int "XFyun speech speed (0-100, default 50, smaller = slower)"
+        range 0 100
+        default 40
+
+    config TTS_XFYUN_VOLUME
+        int "XFyun volume (0-100, default 50)"
+        range 0 100
+        default 50
+
+endmenu
