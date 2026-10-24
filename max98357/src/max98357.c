@@ -114,6 +114,15 @@ esp_err_t max98357_play(const int16_t *data, size_t bytes, uint32_t timeout_ms)
             ESP_LOGE(TAG, "I2S 写失败: %s (写入 %u/%u 字节)",
                      esp_err_to_name(err), (unsigned)written, (unsigned)bytes);
         }
+    } else {
+        /* 首次写成功也打印，证明音频 FIFO 确实把数据塞进去了
+         *（配合开机自测音，判断是「写不进去」还是「到不了扬声器」） */
+        static bool ok_reported = false;
+        if (!ok_reported) {
+            ok_reported = true;
+            ESP_LOGI(TAG, "I2S 写成功（首帧 %u 字节 -> 功放 DIN=GPIO%d）",
+                     (unsigned)written, (int)s_cfg.din);
+        }
     }
     return err;
 }
@@ -147,13 +156,14 @@ esp_err_t max98357_mic_read(int16_t *data, size_t bytes, size_t *written, uint32
 esp_err_t max98357_play_beep(void)
 {
     if (!s_ready) {
+        ESP_LOGE(TAG, "播放方波失败: 驱动未初始化");
         return ESP_ERR_INVALID_STATE;
     }
 
     /* 半个周期占用的采样点数 -> 实际频率 = 采样率 / (2 * half_samples) */
     const uint32_t half_samples = s_cfg.sample_rate_hz / (2 * s_cfg.beep_freq_hz);
     const int      samples     = (int)(s_cfg.sample_rate_hz * s_cfg.beep_ms / 1000);
-    const int16_t  amp         = 8000;
+    const int16_t  amp         = 16384;
 
     if (half_samples == 0 || samples <= 0) {
         return ESP_ERR_INVALID_ARG;
@@ -269,7 +279,7 @@ esp_err_t max98357_play_tone(float freq, uint32_t duration_ms)
     if (duration_ms == 0) duration_ms = s_cfg.beep_ms;
 
     uint32_t samples = 0;
-    esp_err_t err = generate_sine(NULL, &samples, freq, duration_ms, 8000);
+    esp_err_t err = generate_sine(NULL, &samples, freq, duration_ms, 16384);
     if (err != ESP_OK) return err;
 
     int16_t *buf = malloc(samples * sizeof(int16_t));
@@ -278,7 +288,7 @@ esp_err_t max98357_play_tone(float freq, uint32_t duration_ms)
         return ESP_ERR_NO_MEM;
     }
 
-    err = generate_sine(buf, &samples, freq, duration_ms, 8000);
+    err = generate_sine(buf, &samples, freq, duration_ms, 16384);
     if (err == ESP_OK) {
         err = max98357_play(buf, samples * sizeof(int16_t), UINT32_MAX);
     }
