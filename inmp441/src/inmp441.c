@@ -13,6 +13,7 @@
  *           接收 DMA，防止全双工模式下接收端溢出。
  */
 #include <string.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -56,6 +57,13 @@ static void mic_task(void *arg)
 
     int16_t block[MIC_BLOCK_SAMPLES];
 
+    /* 诊断用：周期统计麦克风电平。用嘴说话看 RMS 起伏即可判断麦是否在采集。
+     * 用双精度累加，避免平方和撑爆 32 位（32767^2 每样本就近 1e9）。 */
+    static uint32_t s_diag_cnt;
+    static double   s_diag_acc;
+    static int32_t  s_diag_min = 32767;
+    static int32_t  s_diag_max = -32768;
+
     while (s_running) {
         size_t written = 0;
 
@@ -70,6 +78,24 @@ static void mic_task(void *arg)
         uint32_t n = written / sizeof(int16_t);
         if (n > MIC_BLOCK_SAMPLES) {
             n = MIC_BLOCK_SAMPLES;
+        }
+
+        /* --- 诊断：累加电平（double 防溢出）--- */
+        for (uint32_t i = 0; i < n; i++) {
+            int32_t v = block[i];
+            s_diag_acc += (double)v * (double)v;
+            if (v < s_diag_min) s_diag_min = v;
+            if (v > s_diag_max) s_diag_max = v;
+        }
+        s_diag_cnt += n;
+        if (s_diag_cnt >= 16000) {   /* 约 1s 汇总一次，避免刷屏 */
+            double rms = sqrt(s_diag_acc / s_diag_cnt);
+            ESP_LOGI(TAG, "麦克风电平: RMS=%.0f 范围=[%ld,%ld] (说话时应明显起伏)",
+                     rms, (long)s_diag_min, (long)s_diag_max);
+            s_diag_acc  = 0;
+            s_diag_cnt  = 0;
+            s_diag_min  = 32767;
+            s_diag_max  = -32768;
         }
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
