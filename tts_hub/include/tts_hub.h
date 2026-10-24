@@ -21,7 +21,9 @@ typedef enum {
 typedef void (*tts_pcm_cb_t)(const int16_t *pcm, size_t samples,
                              uint32_t sample_rate_hz, void *ctx);
 
-/* 播放沉槽：tts_hub 把已重采样好的 PCM 交给它（通常由 main 注册，接到 I2S 功放） */
+/* PCM 输出槽：板级把「已重采样好」的 PCM 推给功放的函数注册进来，
+ * tts_hub 只管合成/重采样，不依赖具体功放驱动。与 board.c 的
+ * board_tts_sink 签名一致（无 ctx、无返回值）。 */
 typedef void (*tts_pcm_sink_t)(const int16_t *pcm, size_t bytes);
 
 /* 驱动接口表 —— 每个厂商实现一套填进来 */
@@ -33,15 +35,11 @@ typedef struct {
 } tts_driver_t;
 
 /**
- * @brief 初始化 TTS 中心
- * @param sink          PCM 播放沉槽（必填，接功放）；可稍后 set 覆盖
- * @param output_rate_hz 目标播放采样率（与功放一致，如 22050）
+ * @brief 初始化 TTS 中心（把输出槽与喇叭采样率一并注入）
+ * @param sink            PCM 输出槽（板级功放适配器，如 board_tts_sink）
+ * @param output_rate_hz  喇叭采样率；云 TTS/片段统一 16k 输入，重采样到此值
  */
 esp_err_t tts_hub_init(tts_pcm_sink_t sink, uint32_t output_rate_hz);
-
-/* 运行期调整沉槽 / 输出采样率 */
-void tts_hub_set_pcm_sink(tts_pcm_sink_t sink);
-void tts_hub_set_output_rate(uint32_t hz);
 
 /* ============ 任意文本（走云 TTS，需联网） ============ */
 esp_err_t tts_hub_speak(const char *text);
@@ -51,9 +49,12 @@ esp_err_t tts_hub_speak_async(const char *text);
 esp_err_t tts_hub_say(tts_phrase_t ph);
 esp_err_t tts_hub_say_async(tts_phrase_t ph);
 
-/* 是否在线（由上层在 GOT_IP / DISCONNECTED 时更新），影响固定话术兜底 */
+/* 在线状态（上层在 GOT_IP / DISCONNECTED 时更新），影响固定话术兜底 */
 void tts_hub_set_online(bool online);
 bool tts_hub_online(void);
+
+/* 该话术是否已内置离线片段（供上层决定「用片段还是本地提示音」） */
+bool tts_hub_has_clip(tts_phrase_t ph);
 
 bool      tts_hub_is_busy(void);
 const char *tts_hub_provider_name(void);

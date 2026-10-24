@@ -227,7 +227,7 @@ esp_err_t max98357_start_task(void)
 static esp_err_t generate_sine(int16_t *out_buf, uint32_t *samples,
                                 float freq, uint32_t duration_ms, int16_t amp)
 {
-    if (out_buf == NULL || samples == NULL || duration_ms == 0) {
+    if (samples == NULL || duration_ms == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -236,6 +236,11 @@ static esp_err_t generate_sine(int16_t *out_buf, uint32_t *samples,
     if (total == 0) return ESP_ERR_INVALID_ARG;
 
     *samples = total;
+
+    /* out_buf == NULL：仅查询所需样本数（play_tone 首次调用就是这种用法） */
+    if (out_buf == NULL) {
+        return ESP_OK;
+    }
 
     if (freq <= 0.0f) {
         /* 静音：全零 */

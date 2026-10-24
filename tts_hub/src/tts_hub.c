@@ -1,13 +1,10 @@
-/* tts_hub —— 厂商无关的统一入口（云 TTS 为主 + 离线片段兜底）
+/* tts_hub —— 厂商无关的统一入口
+ * 播放侧：收到驱动回调的 PCM（16k）后线性重采样到喇叭采样率再送输出槽。
  *
  * 策略：
- *   - 固定话术 tts_hub_say()：有离线片段→直接播（离线、低延迟）；
+ *   - 固定话术 tts_hub_say()：有内置离线片段→直接播（离线、低延迟）；
  *     无片段→在线则走云 TTS，离线则仅日志提示。
  *   - 任意文本 tts_hub_speak()：走云 TTS（需联网）。
- *
- * 播放解耦：本组件不直接依赖 I2S/功放，改为把重采样后的 PCM
- * 交给上层注册的 sink（main 里接 max98357_play）。这样组件可复用、
- * 不产生 "组件依赖 main" 的反向依赖。
  */
 #include <string.h>
 #include <stdlib.h>
@@ -23,17 +20,19 @@
 
 static const char *TAG = "TTS_HUB";
 
+/* PCM 输出槽：由 tts_hub_init() 注入，未注入时 speak/say 直接失败 */
+static tts_pcm_sink_t s_sink = NULL;
+static uint32_t       s_out_rate = 22050;  /* 输出采样率 */
+static volatile bool  s_online = true;     /* 上层用 tts_hub_set_online 同步 */
+
+#define TTS_SRC_HZ 16000                    /* 云 TTS / 离线片段统一输入采样率 */
+
+/* 厂商表：新增厂商时加一行 + 实现对应 tts_drv_xxx 即可 */
 static const tts_driver_t *s_drvs[] = {
     [TTS_PROVIDER_XFYUN] = &tts_drv_xfyun,
-    [TTS_PROVIDER_BAIDU] = NULL,
-    [TTS_PROVIDER_ALI]   = NULL,
+    [TTS_PROVIDER_BAIDU] = NULL,   /* 待实现 */
+    [TTS_PROVIDER_ALI]   = NULL,   /* 待实现 */
 };
-
-static volatile bool   s_online   = true;
-static tts_pcm_sink_t  s_sink     = NULL;
-static uint32_t        s_out_rate = 22050;
-/* 云/片段源采样率统一按 16000 处理（讯飞 raw 与生成脚本均输出 16k） */
-#define TTS_SRC_HZ 16000
 
 static const tts_driver_t *active_drv(void)
 {
@@ -43,16 +42,60 @@ static const tts_driver_t *active_drv(void)
     return s_drvs[p];
 }
 
-/* 播放 16k s16le 单声道 PCM：重采样到输出采样率后分片交给 sink */
-static void tts_play_pcm16(const int16_t *in, size_t samples)
+esp_err_t tts_hub_init(tts_pcm_sink_t sink, uint32_t output_rate_hz)
+{
+    if (!sink) return ESP_ERR_INVALID_ARG;
+    s_sink = sink;
+    if (output_rate_hz) s_out_rate = output_rate_hz;
+
+    const tts_driver_t *d = active_drv();
+    if (!d) {
+        ESP_LOGE(TAG, "厂商未实现 (id=%d)", (int)TTS_ACTIVE_PROVIDER);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    ESP_LOGI(TAG, "当前厂商: %s  输出采样率=%lu", d->name,
+             (unsigned long)s_out_rate);
+    return d->init ? d->init() : ESP_OK;
+}
+
+const char *tts_hub_provider_name(void)
+{
+    const tts_driver_t *d = active_drv();
+    return d ? d->name : "none";
+}
+
+bool tts_hub_is_busy(void)
+{
+    const tts_driver_t *d = active_drv();
+    return d && d->is_busy ? d->is_busy() : false;
+}
+
+void tts_hub_set_online(bool online) { s_online = online; }
+bool tts_hub_online(void)            { return s_online; }
+
+/* 播放 16k s16le 单声道 PCM：需要时重采样到 s_out_rate 后分片送输出槽 */
+static void play_pcm16(const int16_t *in, size_t samples)
 {
     if (!in || samples == 0) return;
-    if (!s_sink) { ESP_LOGW(TAG, "未注册 PCM sink，丢弃音频"); return; }
+    if (!s_sink) {
+        ESP_LOGE(TAG, "未注册 PCM 输出槽");
+        return;
+    }
 
-    const uint32_t DST = s_out_rate ? s_out_rate : TTS_SRC_HZ;
+    /* 采样率一致：直通，零开销、零失真（board 采样率 16000 时走这里） */
+    if (s_out_rate == TTS_SRC_HZ) {
+        const size_t CHUNK = 2048;
+        for (size_t o = 0; o < samples; o += CHUNK) {
+            size_t n = (samples - o) > CHUNK ? CHUNK : (samples - o);
+            s_sink(in + o, n * sizeof(int16_t));
+        }
+        return;
+    }
+
+    const uint32_t DST = s_out_rate;
     size_t out_n = samples * DST / TTS_SRC_HZ;
     int16_t *out = malloc(out_n * sizeof(int16_t));
-    if (!out) {
+    if (!out) {  /* 内存不足则按原采样直接送输出槽（会变调，仅保底） */
         s_sink(in, samples * sizeof(int16_t));
         return;
     }
@@ -72,59 +115,22 @@ static void tts_play_pcm16(const int16_t *in, size_t samples)
     free(out);
 }
 
+/* 云 TTS 解出 PCM 的回调（src 固定 16k） */
 static void cloud_play_cb(const int16_t *in, size_t samples,
                           uint32_t src_hz, void *ctx)
 {
     (void)src_hz; (void)ctx;
-    tts_play_pcm16(in, samples);
-}
-
-esp_err_t tts_hub_init(tts_pcm_sink_t sink, uint32_t output_rate_hz)
-{
-    if (sink)      s_sink = sink;
-    if (output_rate_hz) s_out_rate = output_rate_hz;
-
-    const tts_driver_t *d = active_drv();
-    if (!d) {
-        ESP_LOGE(TAG, "厂商未实现 (id=%d)", (int)TTS_ACTIVE_PROVIDER);
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-    ESP_LOGI(TAG, "当前厂商: %s  输出采样率=%lu", d->name,
-             (unsigned long)s_out_rate);
-    return d->init ? d->init() : ESP_OK;
-}
-
-void tts_hub_set_pcm_sink(tts_pcm_sink_t sink) { s_sink = sink; }
-void tts_hub_set_output_rate(uint32_t hz)      { if (hz) s_out_rate = hz; }
-
-const char *tts_hub_provider_name(void)
-{
-    const tts_driver_t *d = active_drv();
-    return d ? d->name : "none";
-}
-
-bool tts_hub_is_busy(void)
-{
-    const tts_driver_t *d = active_drv();
-    return d && d->is_busy ? d->is_busy() : false;
-}
-
-void tts_hub_set_online(bool online) { s_online = online; }
-bool tts_hub_online(void)            { return s_online; }
-
-static bool offline_have(tts_phrase_t ph)
-{
-    return ph < TTS_PHRASE_MAX && tts_clips[ph].data && tts_clips[ph].len >= 2;
-}
-static void offline_play(tts_phrase_t ph)
-{
-    tts_play_pcm16((const int16_t *)tts_clips[ph].data, tts_clips[ph].len / 2);
+    play_pcm16(in, samples);
 }
 
 esp_err_t tts_hub_speak(const char *text)
 {
     const tts_driver_t *d = active_drv();
     if (!d || !d->speak) return ESP_ERR_NOT_SUPPORTED;
+    if (!s_sink) {
+        ESP_LOGE(TAG, "未注册 PCM 输出槽");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_online) {
         ESP_LOGW(TAG, "离线，无法合成任意文本: %s", text);
         return ESP_ERR_INVALID_STATE;
@@ -135,15 +141,24 @@ esp_err_t tts_hub_speak(const char *text)
     return r;
 }
 
+static bool offline_have(tts_phrase_t ph)
+{
+    return ph < TTS_PHRASE_MAX && tts_clips[ph].data && tts_clips[ph].len >= 2;
+}
+
+bool tts_hub_has_clip(tts_phrase_t ph) { return offline_have(ph); }
+
 esp_err_t tts_hub_say(tts_phrase_t ph)
 {
     if (ph >= TTS_PHRASE_MAX) return ESP_ERR_INVALID_ARG;
 
+    /* 1) 离线片段优先：离线、低延迟、断网也能播 */
     if (offline_have(ph)) {
         ESP_LOGI(TAG, "离线片段播放: %s", tts_phrase_text(ph));
-        offline_play(ph);
+        play_pcm16((const int16_t *)tts_clips[ph].data, tts_clips[ph].len / 2);
         return ESP_OK;
     }
+    /* 2) 无片段：在线走云 TTS，离线仅日志 */
     const char *text = tts_phrase_text(ph);
     if (s_online) {
         ESP_LOGI(TAG, "无离线片段，回退云 TTS: %s", text);
@@ -178,6 +193,7 @@ static esp_err_t spawn(async_arg_t *a)
 
 esp_err_t tts_hub_speak_async(const char *text)
 {
+    if (tts_hub_is_busy()) return ESP_ERR_INVALID_STATE;
     async_arg_t *a = malloc(sizeof(*a));
     if (!a) return ESP_ERR_NO_MEM;
     a->text = strdup(text); a->ph = 0; a->is_phrase = false;
@@ -187,6 +203,7 @@ esp_err_t tts_hub_speak_async(const char *text)
 
 esp_err_t tts_hub_say_async(tts_phrase_t ph)
 {
+    if (tts_hub_is_busy()) return ESP_ERR_INVALID_STATE;
     async_arg_t *a = malloc(sizeof(*a));
     if (!a) return ESP_ERR_NO_MEM;
     a->text = NULL; a->ph = ph; a->is_phrase = true;

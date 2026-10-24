@@ -261,6 +261,16 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
     if (base != IP_EVENT || id != IP_EVENT_STA_GOT_IP) return;
 
     s_retry_count = 0;
+
+    /* NTP 必须在 GOT_IP 事件之前启动：GOT_IP 回调里（唤醒引擎 / 云 TTS）
+     * 会同步阻塞等待 SNTP 对时（xffyun_wait_sntp），若在此事件之后才
+     * sntp_init()，回调会一直空等到超时，期间 SNTP 从未运行 —— 鉴权必然
+     * 失败（表现为「时间戳=5..25 一直不等，最后 SNTP 未同步」）。 */
+    if (s_cfg.enable_ntp && s_cfg.ntp_server != NULL) {
+        sntp_setservername(0, (char *)s_cfg.ntp_server);
+        sntp_init();
+    }
+
     emit_event(WIFI_MGR_EV_GOT_IP);
 
     /* 打印 IP + 本次连接总耗时 */
@@ -306,11 +316,8 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         }
     }
 
-    /* NTP：连上后启动时间同步 */
-    if (s_cfg.enable_ntp && s_cfg.ntp_server != NULL) {
-        sntp_setservername(0, (char *)s_cfg.ntp_server);
-        sntp_init();
-    }
+    /* NTP 已在 GOT_IP 事件之前启动（见上），此处不再重复，避免与回调里
+     * 的 SNTP 等待产生「先等后启」的时序死锁。 */
 }
 
 /* ==================== 公共 API ==================== */
